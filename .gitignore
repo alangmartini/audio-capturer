@@ -22,3 +22,9 @@ Thumbs.db
 
 # Recordings (user data)
 *.wav
+
+# Screenshots and images
+*.png
+
+# Playwright MCP
+.playwright-mcp/
