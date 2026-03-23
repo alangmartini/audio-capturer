@@ -1,0 +1,18 @@
+# Core - required for audio capture
+PyAudioWPATCH>=0.2.12
+numpy>=1.24
+
+# Transcription - install these for Whisper support
+openai-whisper>=20231117
+
+# Web UI
+flask>=3.0
+
+# Speaker diarization (optional) - identifies different speakers
+# Requires a HuggingFace token: https://huggingface.co/settings/tokens
+# Must accept model terms at: https://huggingface.co/pyannote/speaker-diarization-3.1
+# pyannote.audio>=3.1
+
+# Alternative: faster-whisper for GPU-accelerated transcription
+# Uncomment the line below and comment out openai-whisper if you have a CUDA GPU
+# faster-whisper>=0.10.0

@@ -1,0 +1,1211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audio Capturer</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #242836;
+    --border: #2e3345;
+    --text: #e1e4ed;
+    --text2: #8b90a0;
+    --accent: #6c8cff;
+    --accent-hover: #8da6ff;
+    --red: #ff5c5c;
+    --red-bg: #2a1515;
+    --green: #4cda7c;
+    --green-bg: #152a1a;
+    --yellow: #f0c040;
+    --yellow-bg: #2a2515;
+    --radius: 8px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  header h1 { font-size: 18px; font-weight: 600; }
+  header .rec-badge {
+    background: var(--red);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
+    display: none;
+    animation: pulse 1.5s infinite;
+  }
+  header .rec-badge.active { display: inline-block; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  /* Tabs */
+  .tabs {
+    display: flex;
+    gap: 0;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+  }
+  .tab-btn {
+    background: none;
+    border: none;
+    color: var(--text2);
+    padding: 12px 20px;
+    font-size: 14px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .tab-content { display: none; padding: 24px; max-width: 900px; margin: 0 auto; }
+  .tab-content.active { display: block; }
+
+  /* Cards */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .card h3 { font-size: 14px; color: var(--text2); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  /* Form elements */
+  label { display: block; font-size: 13px; color: var(--text2); margin-bottom: 4px; }
+  select, input[type="text"], input[type="number"], input[type="password"] {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    width: 100%;
+    outline: none;
+  }
+  select:focus, input:focus { border-color: var(--accent); }
+
+  .form-row { display: flex; gap: 16px; margin-bottom: 12px; }
+  .form-row > * { flex: 1; }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border: none;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-danger { background: var(--red); color: #fff; }
+  .btn-danger:hover { opacity: 0.85; }
+  .btn-ghost {
+    background: var(--surface2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-ghost:hover { border-color: var(--accent); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-sm { padding: 5px 10px; font-size: 12px; }
+
+  /* Level meter */
+  .level-bar-container {
+    background: var(--surface2);
+    border-radius: 4px;
+    height: 24px;
+    overflow: hidden;
+    margin: 12px 0;
+  }
+  .level-bar {
+    height: 100%;
+    background: var(--green);
+    border-radius: 4px;
+    transition: width 0.2s;
+    width: 0%;
+  }
+  .level-bar.hot { background: var(--yellow); }
+  .level-bar.clip { background: var(--red); }
+
+  .rec-status {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+    color: var(--text2);
+  }
+  .rec-status .elapsed { font-family: monospace; font-size: 18px; color: var(--text); }
+
+  /* Recordings list */
+  .recording-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+  }
+  .recording-item .info { flex: 1; }
+  .recording-item .name { font-weight: 500; font-size: 14px; }
+  .recording-item .meta { font-size: 12px; color: var(--text2); margin-top: 2px; }
+  .recording-item .badges { display: flex; gap: 4px; margin-top: 4px; }
+  .badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .badge-txt { background: #1a2a3a; color: #6cb8ff; }
+  .badge-srt { background: #2a1a3a; color: #b06cff; }
+  .badge-json { background: #1a3a2a; color: #6cffb0; }
+  .recording-item .actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+  /* Audio player */
+  .audio-player {
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: none;
+  }
+  .audio-player.active { display: block; }
+  .audio-player audio { width: 100%; height: 32px; }
+
+  .empty-state {
+    text-align: center;
+    padding: 48px;
+    color: var(--text2);
+    font-size: 14px;
+  }
+
+  /* Transcription banner */
+  .transcription-banner {
+    background: var(--yellow-bg);
+    border: 1px solid var(--yellow);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    display: none;
+  }
+  .transcription-banner.active { display: flex; align-items: center; gap: 12px; }
+  .transcription-banner .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid var(--yellow);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Transcript viewer */
+  .transcript-viewer {
+    display: none;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-top: 12px;
+    white-space: pre-wrap;
+    font-size: 13px;
+    max-height: 400px;
+    overflow-y: auto;
+    line-height: 1.6;
+  }
+  .transcript-viewer.active { display: block; }
+
+  /* Settings */
+  .setting-group { margin-bottom: 16px; }
+  .setting-group:last-child { margin-bottom: 0; }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .toggle {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    cursor: pointer;
+  }
+  .toggle input { display: none; }
+  .toggle .slider {
+    position: absolute;
+    inset: 0;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    transition: 0.2s;
+  }
+  .toggle .slider::before {
+    content: "";
+    position: absolute;
+    width: 18px; height: 18px;
+    left: 2px; top: 2px;
+    background: var(--text2);
+    border-radius: 50%;
+    transition: 0.2s;
+  }
+  .toggle input:checked + .slider { background: var(--accent); border-color: var(--accent); }
+  .toggle input:checked + .slider::before { transform: translateX(20px); background: #fff; }
+
+  /* Error container */
+  #error-container {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    width: 420px;
+    max-height: 50vh;
+    overflow-y: auto;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .error-card {
+    background: var(--red-bg);
+    border: 1px solid var(--red);
+    border-radius: var(--radius);
+    padding: 12px;
+    font-size: 13px;
+    animation: slideIn 0.2s;
+  }
+  @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } }
+  .error-card .error-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .error-card .error-time { font-size: 11px; color: var(--text2); }
+  .error-card .error-msg { color: var(--red); font-weight: 500; margin-top: 4px; }
+  .error-card .error-dismiss {
+    background: none; border: none; color: var(--text2); cursor: pointer;
+    font-size: 16px; line-height: 1; padding: 0;
+  }
+  .error-card .error-dismiss:hover { color: var(--text); }
+  .error-card .error-tb {
+    display: none;
+    margin-top: 8px;
+    padding: 8px;
+    background: rgba(0,0,0,0.3);
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 11px;
+    white-space: pre-wrap;
+    color: var(--text2);
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .error-card .error-tb.open { display: block; }
+  .error-card .error-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .error-link {
+    background: none; border: none; color: var(--accent); cursor: pointer;
+    font-size: 12px; padding: 0; text-decoration: underline;
+  }
+
+  /* Device table */
+  #device-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  #device-table th, #device-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  #device-table th {
+    color: var(--text2);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  #device-table .loopback { color: var(--green); font-weight: 500; }
+
+  /* Preview level bars */
+  .preview-section {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .preview-section:last-child { border-bottom: none; }
+  .preview-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .preview-device {
+    font-size: 12px;
+    color: var(--text2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Speaker colors in transcripts */
+  .speaker-label { font-weight: 600; }
+  .speaker-1 { color: #6c8cff; }
+  .speaker-2 { color: #ff6cb0; }
+  .speaker-3 { color: #4cda7c; }
+  .speaker-4 { color: #f0c040; }
+  .speaker-5 { color: #c06cff; }
+  .speaker-6 { color: #ff8c6c; }
+  .speaker-7 { color: #6cffda; }
+  .speaker-8 { color: #ff6c6c; }
+
+  /* Diarization settings helper text */
+  .help-text { color: var(--text2); font-size: 11px; margin-top: 4px; }
+  .diarization-status { font-size: 12px; padding: 6px 10px; border-radius: var(--radius); margin-top: 8px; }
+  .diarization-status.ok { background: var(--green-bg); color: var(--green); }
+  .diarization-status.warn { background: var(--yellow-bg); color: var(--yellow); }
+  .diarization-status.err { background: var(--red-bg); color: var(--red); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Audio Capturer</h1>
+  <span id="rec-badge" class="rec-badge">REC</span>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="record">Record</button>
+  <button class="tab-btn" data-tab="recordings">Recordings</button>
+  <button class="tab-btn" data-tab="settings">Settings</button>
+</nav>
+
+<!-- ═══ Record Tab ═══ -->
+<div id="tab-record" class="tab-content active">
+  <div class="card">
+    <h3>Audio Source</h3>
+    <div class="form-row">
+      <div>
+        <label for="rec-name">Recording Name</label>
+        <input type="text" id="rec-name" placeholder="Auto-generated">
+      </div>
+      <div>
+        <label for="rec-device">Device</label>
+        <select id="rec-device"><option value="">Loading...</option></select>
+      </div>
+      <div>
+        <label for="rec-duration">Max Duration (minutes)</label>
+        <input type="number" id="rec-duration" placeholder="Unlimited" min="1">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Setup & Testing</h3>
+
+    <!-- Device list -->
+    <div class="preview-section">
+      <div class="preview-header">
+        <button class="btn btn-ghost btn-sm" onclick="toggleDeviceList()">Show All Devices</button>
+      </div>
+      <div id="device-table-wrap" style="display:none;">
+        <table id="device-table"></table>
+      </div>
+    </div>
+
+    <!-- Mic test -->
+    <div class="preview-section">
+      <div class="preview-header">
+        <button id="btn-mic-test" class="btn btn-ghost btn-sm" onclick="toggleMicTest()">Test Microphone</button>
+        <span id="mic-device-name" class="preview-device"></span>
+      </div>
+      <div id="mic-level-wrap" style="display:none;">
+        <div class="level-bar-container">
+          <div id="mic-level-bar" class="level-bar"></div>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text2);">
+          <span>RMS: <span id="mic-rms">0.0000</span></span>
+          <span>Peak: <span id="mic-peak">0.0000</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Loopback preview -->
+    <div class="preview-section">
+      <div class="preview-header">
+        <button id="btn-loopback-test" class="btn btn-ghost btn-sm" onclick="toggleLoopbackPreview()">Preview System Audio</button>
+        <span id="loopback-device-name" class="preview-device"></span>
+      </div>
+      <div id="loopback-level-wrap" style="display:none;">
+        <div class="level-bar-container">
+          <div id="loopback-level-bar" class="level-bar"></div>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text2);">
+          <span>RMS: <span id="loopback-rms">0.0000</span></span>
+          <span>Peak: <span id="loopback-peak">0.0000</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Controls</h3>
+    <div style="display:flex; gap:12px; margin-bottom:12px;">
+      <button id="btn-start" class="btn btn-primary" onclick="startRecording()">Start Recording</button>
+      <button id="btn-stop" class="btn btn-danger" onclick="stopRecording()" disabled>Stop Recording</button>
+    </div>
+
+    <div id="rec-info" style="display:none;">
+      <div class="rec-status">
+        <span class="elapsed" id="rec-elapsed">00:00:00</span>
+        <span id="rec-file" style="font-size:12px;"></span>
+      </div>
+      <div class="level-bar-container">
+        <div id="level-bar" class="level-bar"></div>
+      </div>
+      <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text2);">
+        <span>RMS: <span id="rec-rms">0.000</span></span>
+        <span>Peak: <span id="rec-peak">0.000</span></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Recordings Tab ═══ -->
+<div id="tab-recordings" class="tab-content">
+  <div id="transcription-banner" class="transcription-banner">
+    <div class="spinner"></div>
+    <span id="transcription-banner-text">Transcribing...</span>
+  </div>
+
+  <div id="recordings-list"></div>
+
+  <div id="transcript-viewer-wrap">
+    <div id="transcript-viewer" class="transcript-viewer"></div>
+  </div>
+</div>
+
+<!-- ═══ Settings Tab ═══ -->
+<div id="tab-settings" class="tab-content">
+  <div class="card">
+    <h3>Output</h3>
+    <div class="setting-group">
+      <label for="set-output-dir">Recordings Directory</label>
+      <input type="text" id="set-output-dir" placeholder="~/MeetingRecordings">
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Transcription</h3>
+    <div class="setting-group">
+      <label for="set-model">Whisper Model</label>
+      <select id="set-model">
+        <option value="tiny">tiny</option>
+        <option value="base">base</option>
+        <option value="small">small</option>
+        <option value="medium">medium</option>
+        <option value="large">large</option>
+      </select>
+    </div>
+    <div class="setting-group">
+      <div class="toggle-row">
+        <label style="margin:0">Auto-transcribe after recording</label>
+        <label class="toggle">
+          <input type="checkbox" id="set-auto-transcribe">
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Speaker Diarization</h3>
+    <div class="setting-group">
+      <div class="toggle-row">
+        <label style="margin:0">Enable speaker identification</label>
+        <label class="toggle">
+          <input type="checkbox" id="set-diarization">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="help-text">Identifies different speakers as Person 1, Person 2, etc.</div>
+    </div>
+    <div class="setting-group">
+      <label for="set-hf-token">HuggingFace Token</label>
+      <input type="password" id="set-hf-token" placeholder="hf_...">
+      <div class="help-text">Required for pyannote.audio. Get one at huggingface.co/settings/tokens</div>
+    </div>
+    <div class="setting-group">
+      <label for="set-max-speakers">Max speakers (optional)</label>
+      <input type="number" id="set-max-speakers" placeholder="Auto-detect" min="1" max="20">
+      <div class="help-text">Leave empty to auto-detect the number of speakers</div>
+    </div>
+    <div id="diarization-status"></div>
+  </div>
+
+  <div class="card">
+    <h3>Audio Device</h3>
+    <div class="setting-group">
+      <label for="set-device">Default Device</label>
+      <select id="set-device"><option value="">Auto-detect</option></select>
+    </div>
+  </div>
+
+  <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+</div>
+
+<div id="error-container"></div>
+
+<script>
+// ─── API wrapper ──────────────────────────────────────────────────────────
+async function apiCall(url, opts = {}) {
+  try {
+    const res = await fetch(url, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts,
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      showError(data.error || `HTTP ${res.status}`, data.traceback);
+      return null;
+    }
+    return data;
+  } catch (e) {
+    showError(e.message);
+    return null;
+  }
+}
+
+// ─── Error display ────────────────────────────────────────────────────────
+function showError(msg, tb) {
+  const container = document.getElementById('error-container');
+  const card = document.createElement('div');
+  card.className = 'error-card';
+  const now = new Date().toLocaleTimeString();
+  card.innerHTML = `
+    <div class="error-header">
+      <span class="error-time">${now}</span>
+      <button class="error-dismiss" onclick="this.closest('.error-card').remove()">&times;</button>
+    </div>
+    <div class="error-msg">${escapeHtml(msg)}</div>
+    ${tb ? `
+      <div class="error-actions">
+        <button class="error-link" onclick="this.parentElement.nextElementSibling.classList.toggle('open')">Toggle traceback</button>
+        <button class="error-link" onclick="copyTb(this)">Copy</button>
+      </div>
+      <div class="error-tb">${escapeHtml(tb)}</div>
+    ` : ''}
+  `;
+  container.appendChild(card);
+  setTimeout(() => { if (card.parentElement) card.remove(); }, 30000);
+}
+
+function copyTb(btn) {
+  const tb = btn.closest('.error-card').querySelector('.error-tb');
+  navigator.clipboard.writeText(tb.textContent);
+  btn.textContent = 'Copied!';
+  setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+// ─── Tabs ─────────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'recordings') loadRecordings();
+    if (btn.dataset.tab === 'settings') loadSettings();
+  });
+});
+
+// ─── Recording ────────────────────────────────────────────────────────────
+let statusPoll = null;
+
+async function startRecording() {
+  // Stop any active previews before recording
+  stopMicTest();
+  if (loopbackPoll) await stopLoopbackPreview();
+
+  const dur = document.getElementById('rec-duration').value;
+  const recName = document.getElementById('rec-name').value.trim();
+  const body = {};
+  if (dur) body.max_duration_minutes = parseInt(dur);
+  if (recName) body.name = recName;
+
+  const data = await apiCall('/api/recording/start', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  if (data) {
+    setRecordingUI(true);
+    startStatusPoll();
+  }
+}
+
+async function stopRecording() {
+  const data = await apiCall('/api/recording/stop', { method: 'POST' });
+  if (data) {
+    setRecordingUI(false);
+    stopStatusPoll();
+  }
+}
+
+function setRecordingUI(recording) {
+  document.getElementById('btn-start').disabled = recording;
+  document.getElementById('btn-stop').disabled = !recording;
+  document.getElementById('rec-info').style.display = recording ? 'block' : 'none';
+  document.getElementById('rec-badge').classList.toggle('active', recording);
+}
+
+function startStatusPoll() {
+  stopStatusPoll();
+  statusPoll = setInterval(pollStatus, 300);
+}
+
+function stopStatusPoll() {
+  if (statusPoll) { clearInterval(statusPoll); statusPoll = null; }
+}
+
+async function pollStatus() {
+  const data = await apiCall('/api/recording/status');
+  if (!data) return;
+  if (!data.recording) {
+    setRecordingUI(false);
+    stopStatusPoll();
+    return;
+  }
+  document.getElementById('rec-elapsed').textContent = data.elapsed;
+  document.getElementById('rec-rms').textContent = data.rms.toFixed(4);
+  document.getElementById('rec-peak').textContent = data.peak_rms.toFixed(4);
+  document.getElementById('rec-file').textContent = data.file;
+
+  const pct = Math.min(data.rms * 300, 100);
+  const bar = document.getElementById('level-bar');
+  bar.style.width = pct + '%';
+  bar.className = 'level-bar' + (pct > 80 ? ' clip' : pct > 50 ? ' hot' : '');
+}
+
+// ─── Recordings ───────────────────────────────────────────────────────────
+let transcriptionPoll = null;
+
+async function loadRecordings() {
+  const data = await apiCall('/api/recordings');
+  if (!data) return;
+
+  const list = document.getElementById('recordings-list');
+  if (data.recordings.length === 0) {
+    list.innerHTML = '<div class="empty-state">No recordings yet. Go to the Record tab to get started.</div>';
+    return;
+  }
+
+  list.innerHTML = data.recordings.map(r => {
+    const date = new Date(r.modified * 1000).toLocaleString();
+    const badges = Object.keys(r.transcripts).map(t =>
+      `<span class="badge badge-${t}">${t}</span>`
+    ).join('');
+    const hasTranscript = Object.keys(r.transcripts).length > 0;
+    const safeName = escapeAttr(r.name);
+    return `
+      <div class="recording-item" style="flex-wrap:wrap;">
+        <div class="info">
+          <div class="name">${escapeHtml(r.name)}</div>
+          <div class="meta">${r.size_mb} MB &middot; ${date}</div>
+          <div class="badges">${badges}</div>
+        </div>
+        <div class="actions">
+          <button class="btn btn-ghost btn-sm" id="play-btn-${safeName}" onclick="togglePlay('${safeName}')">Play</button>
+          ${hasTranscript ? `<button class="btn btn-ghost btn-sm" onclick="viewTranscript('${safeName}')">View</button>` : ''}
+          <button class="btn btn-ghost btn-sm" onclick="transcribeFile('${safeName}')">Transcribe</button>
+          <button class="btn btn-ghost btn-sm" onclick="renameRecording('${safeName}')">Rename</button>
+          <button class="btn btn-ghost btn-sm" onclick="downloadFile('${safeName}', 'wav')">Download</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteRecording('${safeName}')">Delete</button>
+        </div>
+        <div class="audio-player" id="player-${safeName}" style="width:100%;">
+          <audio controls preload="none" src="/api/recordings/${encodeURIComponent(r.name)}/download?format=wav"
+                 onplay="onAudioPlay(this, '${safeName}')"
+                 onpause="onAudioPause('${safeName}')"
+                 onended="onAudioPause('${safeName}')">
+          </audio>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  checkTranscriptionStatus();
+}
+
+function escapeAttr(s) {
+  return s.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+async function transcribeFile(name) {
+  const data = await apiCall('/api/transcribe', {
+    method: 'POST',
+    body: JSON.stringify({ filename: name }),
+  });
+  if (data) {
+    startTranscriptionPoll();
+  }
+}
+
+function startTranscriptionPoll() {
+  stopTranscriptionPoll();
+  transcriptionPoll = setInterval(checkTranscriptionStatus, 1000);
+}
+
+function stopTranscriptionPoll() {
+  if (transcriptionPoll) { clearInterval(transcriptionPoll); transcriptionPoll = null; }
+}
+
+async function checkTranscriptionStatus() {
+  const data = await apiCall('/api/transcribe/status');
+  if (!data) return;
+
+  const banner = document.getElementById('transcription-banner');
+  const text = document.getElementById('transcription-banner-text');
+
+  if (data.active) {
+    banner.classList.add('active');
+    const model = data.model ? ` [${data.model}]` : '';
+    const stages = {
+      loading_model: `Loading Whisper model${model}...`,
+      transcribing: `Transcribing with model${model}...`,
+      diarizing: 'Identifying speakers...',
+      saving: 'Saving transcripts...',
+    };
+    text.textContent = `${stages[data.stage] || data.stage} (${data.filename})`;
+    if (!transcriptionPoll) startTranscriptionPoll();
+  } else {
+    banner.classList.remove('active');
+    if (data.stage === 'done') {
+      stopTranscriptionPoll();
+      loadRecordings();
+    } else if (data.stage === 'error' && transcriptionPoll) {
+      // Only show error if we were actively polling (user triggered it)
+      stopTranscriptionPoll();
+      showError('Transcription failed: ' + data.error);
+    } else {
+      stopTranscriptionPoll();
+    }
+  }
+}
+
+function colorizeSpeakers(text) {
+  // Color-code speaker labels like "Person 1:", "[Person 1]"
+  return text.replace(/((?:Person \d+|Unknown))(?=[\]:])/g, (match) => {
+    const num = match.match(/\d+/);
+    const idx = num ? parseInt(num[0]) : 0;
+    const cls = idx >= 1 && idx <= 8 ? `speaker-${idx}` : '';
+    return `<span class="speaker-label ${cls}">${escapeHtml(match)}</span>`;
+  });
+}
+
+function renderTranscript(content, format) {
+  const viewer = document.getElementById('transcript-viewer');
+  if (typeof content === 'object') {
+    // JSON — render with speaker highlighting
+    const jsonStr = JSON.stringify(content, null, 2);
+    viewer.innerHTML = colorizeSpeakers(escapeHtml(jsonStr));
+  } else {
+    viewer.innerHTML = colorizeSpeakers(escapeHtml(content));
+  }
+}
+
+async function viewTranscript(name) {
+  const viewer = document.getElementById('transcript-viewer');
+  // Cycle: closed -> txt -> srt -> json -> closed
+  if (viewer.classList.contains('active') && viewer.dataset.file === name) {
+    const formats = ['txt', 'srt', 'json'];
+    const cur = formats.indexOf(viewer.dataset.format);
+    if (cur < formats.length - 1) {
+      const nextFmt = formats[cur + 1];
+      const data = await apiCall(`/api/recordings/${encodeURIComponent(name)}/transcript?format=${nextFmt}`);
+      if (data) {
+        viewer.dataset.format = nextFmt;
+        renderTranscript(data.content, nextFmt);
+      }
+      return;
+    }
+    viewer.classList.remove('active');
+    viewer.dataset.file = '';
+    return;
+  }
+
+  const data = await apiCall(`/api/recordings/${encodeURIComponent(name)}/transcript?format=txt`);
+  if (data) {
+    renderTranscript(data.content, 'txt');
+    viewer.dataset.file = name;
+    viewer.dataset.format = 'txt';
+    viewer.classList.add('active');
+  }
+}
+
+let activePlayer = null;
+
+function togglePlay(name) {
+  const wrapper = document.getElementById('player-' + name);
+  const audio = wrapper.querySelector('audio');
+  const btn = document.getElementById('play-btn-' + name);
+
+  if (wrapper.classList.contains('active')) {
+    audio.pause();
+    wrapper.classList.remove('active');
+    btn.textContent = 'Play';
+    activePlayer = null;
+  } else {
+    // Stop any other playing audio
+    if (activePlayer && activePlayer !== name) {
+      const prev = document.getElementById('player-' + activePlayer);
+      if (prev) {
+        prev.querySelector('audio').pause();
+        prev.classList.remove('active');
+        const prevBtn = document.getElementById('play-btn-' + activePlayer);
+        if (prevBtn) prevBtn.textContent = 'Play';
+      }
+    }
+    wrapper.classList.add('active');
+    audio.play();
+    btn.textContent = 'Stop';
+    activePlayer = name;
+  }
+}
+
+function onAudioPlay(audioEl, name) {
+  const btn = document.getElementById('play-btn-' + name);
+  if (btn) btn.textContent = 'Stop';
+  activePlayer = name;
+}
+
+function onAudioPause(name) {
+  const btn = document.getElementById('play-btn-' + name);
+  const wrapper = document.getElementById('player-' + name);
+  const audio = wrapper ? wrapper.querySelector('audio') : null;
+  if (btn && audio && audio.paused) {
+    btn.textContent = 'Play';
+  }
+  if (audio && audio.ended) {
+    btn.textContent = 'Play';
+  }
+}
+
+function downloadFile(name, format) {
+  window.open(`/api/recordings/${encodeURIComponent(name)}/download?format=${format}`, '_blank');
+}
+
+async function deleteRecording(name) {
+  if (!confirm(`Delete ${name} and all associated files?`)) return;
+  const data = await apiCall(`/api/recordings/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (data) loadRecordings();
+}
+
+async function renameRecording(name) {
+  const newName = prompt(`Rename "${name}".\nEnter new name (without extension):`, name.replace(/\.wav$/i, ''));
+  if (!newName || !newName.trim()) return;
+  const data = await apiCall(`/api/recordings/${encodeURIComponent(name)}/rename`, {
+    method: 'POST',
+    body: JSON.stringify({ new_name: newName.trim() }),
+  });
+  if (data) {
+    showSuccess(`Renamed to ${data.new_name}`);
+    loadRecordings();
+  }
+}
+
+// ─── Settings ─────────────────────────────────────────────────────────────
+async function loadSettings() {
+  const data = await apiCall('/api/settings');
+  if (!data) return;
+  const s = data.settings;
+  document.getElementById('set-output-dir').value = s.output_dir || '';
+  document.getElementById('set-model').value = s.whisper_model || 'base';
+  document.getElementById('set-auto-transcribe').checked = !!s.auto_transcribe;
+
+  // Diarization settings
+  document.getElementById('set-diarization').checked = !!s.diarization_enabled;
+  document.getElementById('set-hf-token').value = s.hf_token || '';
+  document.getElementById('set-max-speakers').value = s.diarization_max_speakers || '';
+
+  // Check diarization status
+  const diarStatus = await apiCall('/api/diarization/status');
+  const statusEl = document.getElementById('diarization-status');
+  if (diarStatus) {
+    if (!diarStatus.available) {
+      statusEl.className = 'diarization-status warn';
+      statusEl.textContent = 'pyannote.audio not installed. Run: pip install pyannote.audio';
+    } else if (!diarStatus.has_token) {
+      statusEl.className = 'diarization-status warn';
+      statusEl.textContent = 'HuggingFace token required. Enter your token above.';
+    } else if (diarStatus.enabled) {
+      statusEl.className = 'diarization-status ok';
+      statusEl.textContent = 'Speaker diarization is ready.';
+    } else {
+      statusEl.className = 'diarization-status';
+      statusEl.textContent = '';
+    }
+  }
+
+  // Populate device selector
+  const devData = await apiCall('/api/devices');
+  if (devData) {
+    const sel = document.getElementById('set-device');
+    sel.innerHTML = '<option value="">Auto-detect</option>';
+    devData.devices.filter(d => d.is_loopback).forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.index;
+      opt.textContent = `[${d.index}] ${d.name}`;
+      if (s.device_index === d.index) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+}
+
+async function saveSettings() {
+  const devVal = document.getElementById('set-device').value;
+  const maxSpeakers = document.getElementById('set-max-speakers').value;
+  const body = {
+    output_dir: document.getElementById('set-output-dir').value,
+    whisper_model: document.getElementById('set-model').value,
+    auto_transcribe: document.getElementById('set-auto-transcribe').checked,
+    device_index: devVal ? parseInt(devVal) : null,
+    diarization_enabled: document.getElementById('set-diarization').checked,
+    hf_token: document.getElementById('set-hf-token').value || null,
+    diarization_max_speakers: maxSpeakers ? parseInt(maxSpeakers) : null,
+  };
+  const data = await apiCall('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+  if (data) {
+    showSuccess('Settings saved');
+    loadDevices();
+    loadSettings();
+  }
+}
+
+function showSuccess(msg) {
+  const container = document.getElementById('error-container');
+  const card = document.createElement('div');
+  card.className = 'error-card';
+  card.style.borderColor = 'var(--green)';
+  card.style.background = 'var(--green-bg)';
+  card.innerHTML = `
+    <div class="error-header">
+      <span class="error-time">${new Date().toLocaleTimeString()}</span>
+      <button class="error-dismiss" onclick="this.closest('.error-card').remove()">&times;</button>
+    </div>
+    <div class="error-msg" style="color:var(--green)">${escapeHtml(msg)}</div>
+  `;
+  container.appendChild(card);
+  setTimeout(() => { if (card.parentElement) card.remove(); }, 5000);
+}
+
+// ─── Device list ──────────────────────────────────────────────────────────
+async function toggleDeviceList() {
+  const wrap = document.getElementById('device-table-wrap');
+  if (wrap.style.display !== 'none') {
+    wrap.style.display = 'none';
+    return;
+  }
+  const data = await apiCall('/api/devices');
+  if (!data) return;
+
+  let html = '<tr><th>Index</th><th>Name</th><th>Rate</th><th>In</th><th>Out</th><th>Type</th></tr>';
+  data.devices.forEach(d => {
+    const cls = d.is_loopback ? ' class="loopback"' : '';
+    const type = d.is_loopback ? '<span class="loopback">Loopback</span>'
+               : d.max_input_channels > 0 ? 'Input' : 'Output';
+    html += `<tr${cls}>
+      <td>${d.index}</td>
+      <td>${escapeHtml(d.name)}</td>
+      <td>${d.sample_rate}Hz</td>
+      <td>${d.max_input_channels}</td>
+      <td>${d.max_output_channels}</td>
+      <td>${type}</td>
+    </tr>`;
+  });
+  document.getElementById('device-table').innerHTML = html;
+  wrap.style.display = 'block';
+}
+
+// ─── Mic test (Web Audio API) ─────────────────────────────────────────────
+let micStream = null;
+let micCtx = null;
+let micAnalyser = null;
+let micAnimFrame = null;
+let micPeak = 0;
+
+function toggleMicTest() {
+  if (micStream) {
+    stopMicTest();
+  } else {
+    startMicTest();
+  }
+}
+
+async function startMicTest() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    showError('Could not access microphone: ' + e.message);
+    return;
+  }
+
+  micCtx = new AudioContext();
+  const source = micCtx.createMediaStreamSource(micStream);
+  micAnalyser = micCtx.createAnalyser();
+  micAnalyser.fftSize = 2048;
+  source.connect(micAnalyser);
+
+  micPeak = 0;
+  document.getElementById('mic-level-wrap').style.display = 'block';
+  document.getElementById('btn-mic-test').textContent = 'Stop Mic Test';
+  document.getElementById('mic-device-name').textContent = 'Browser microphone';
+
+  function updateMicLevel() {
+    const buf = new Float32Array(micAnalyser.fftSize);
+    micAnalyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rmsVal = Math.sqrt(sum / buf.length);
+    micPeak = Math.max(micPeak, rmsVal);
+
+    const pct = Math.min(rmsVal * 300, 100);
+    const bar = document.getElementById('mic-level-bar');
+    bar.style.width = pct + '%';
+    bar.className = 'level-bar' + (pct > 80 ? ' clip' : pct > 50 ? ' hot' : '');
+    document.getElementById('mic-rms').textContent = rmsVal.toFixed(4);
+    document.getElementById('mic-peak').textContent = micPeak.toFixed(4);
+
+    micAnimFrame = requestAnimationFrame(updateMicLevel);
+  }
+  updateMicLevel();
+}
+
+function stopMicTest() {
+  if (micAnimFrame) { cancelAnimationFrame(micAnimFrame); micAnimFrame = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (micCtx) { micCtx.close().catch(() => {}); micCtx = null; }
+  micAnalyser = null;
+  document.getElementById('mic-level-wrap').style.display = 'none';
+  document.getElementById('btn-mic-test').textContent = 'Test Microphone';
+  document.getElementById('mic-device-name').textContent = '';
+}
+
+// ─── Loopback preview (backend) ───────────────────────────────────────────
+let loopbackPoll = null;
+
+function toggleLoopbackPreview() {
+  if (loopbackPoll) {
+    stopLoopbackPreview();
+  } else {
+    startLoopbackPreview();
+  }
+}
+
+async function startLoopbackPreview() {
+  const data = await apiCall('/api/preview/start', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'loopback' }),
+  });
+  if (!data) return;
+
+  document.getElementById('loopback-level-wrap').style.display = 'block';
+  document.getElementById('btn-loopback-test').textContent = 'Stop Preview';
+  document.getElementById('loopback-device-name').textContent = data.device || '';
+
+  loopbackPoll = setInterval(pollLoopbackLevel, 200);
+}
+
+async function stopLoopbackPreview() {
+  if (loopbackPoll) { clearInterval(loopbackPoll); loopbackPoll = null; }
+  await apiCall('/api/preview/stop', { method: 'POST' });
+  document.getElementById('loopback-level-wrap').style.display = 'none';
+  document.getElementById('btn-loopback-test').textContent = 'Preview System Audio';
+  document.getElementById('loopback-device-name').textContent = '';
+}
+
+async function pollLoopbackLevel() {
+  const data = await apiCall('/api/preview/status');
+  if (!data || !data.active) {
+    if (loopbackPoll) { clearInterval(loopbackPoll); loopbackPoll = null; }
+    document.getElementById('loopback-level-wrap').style.display = 'none';
+    document.getElementById('btn-loopback-test').textContent = 'Preview System Audio';
+    document.getElementById('loopback-device-name').textContent = '';
+    return;
+  }
+  const pct = Math.min(data.rms * 300, 100);
+  const bar = document.getElementById('loopback-level-bar');
+  bar.style.width = pct + '%';
+  bar.className = 'level-bar' + (pct > 80 ? ' clip' : pct > 50 ? ' hot' : '');
+  document.getElementById('loopback-rms').textContent = data.rms.toFixed(4);
+  document.getElementById('loopback-peak').textContent = data.peak_rms.toFixed(4);
+}
+
+// ─── Devices loader ───────────────────────────────────────────────────────
+async function loadDevices() {
+  const data = await apiCall('/api/devices');
+  if (!data) return;
+
+  const recSel = document.getElementById('rec-device');
+  recSel.innerHTML = '<option value="">Auto-detect (default loopback)</option>';
+  data.devices.filter(d => d.is_loopback).forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d.index;
+    opt.textContent = `[${d.index}] ${d.name} (${d.sample_rate}Hz)`;
+    recSel.appendChild(opt);
+  });
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────
+async function init() {
+  loadDevices();
+  // Check if already recording
+  const data = await apiCall('/api/recording/status');
+  if (data && data.recording) {
+    setRecordingUI(true);
+    startStatusPoll();
+  }
+}
+
+init();
+</script>
+</body>
+</html>

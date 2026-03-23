@@ -1,0 +1,24 @@
+# Environment and secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Whisper models (large, downloaded on demand)
+*.pt
+
+# Recordings (user data)
+*.wav
