@@ -7,7 +7,7 @@ via WASAPI loopback on Windows, then optionally transcribes with Whisper.
 
 Requirements:
     pip install pyaudiowpatch numpy wave
-    pip install openai-whisper  (optional, for local transcription)
+    pip install faster-whisper  (optional, for local transcription)
 
 Usage:
     python capture.py                  # Interactive mode
@@ -47,6 +47,19 @@ SILENCE_THRESHOLD = 0.001  # RMS threshold for silence detection
 CONFIG_FILE = Path.home() / ".audio_capture_config.json"
 
 
+def resolve_wav(out_dir, filename):
+    """Resolve a WAV filename to its actual path.
+
+    Checks subfolder first (out_dir/stem/filename),
+    then flat (out_dir/filename) for backward compatibility.
+    """
+    stem = Path(filename).stem
+    subfolder_path = Path(out_dir) / stem / filename
+    if subfolder_path.exists():
+        return subfolder_path
+    return Path(out_dir) / filename
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def load_config():
@@ -60,6 +73,7 @@ def load_config():
         "diarization_enabled": False,
         "hf_token": None,
         "diarization_max_speakers": None,
+        "language": None,
     }
     if CONFIG_FILE.exists():
         try:
@@ -177,14 +191,16 @@ class SystemAudioRecorder:
         self._lock = threading.Lock()
 
     def _generate_filename(self, name=None):
-        """Generate a filename. Uses custom name if provided, otherwise timestamped."""
+        """Generate a filename inside a per-recording subfolder."""
         ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         if name:
-            # Sanitize: keep alphanumeric, spaces, hyphens, underscores
             safe = "".join(c for c in name if c.isalnum() or c in " -_").strip()
-            if safe:
-                return self.output_dir / f"{safe}_{ts}.wav"
-        return self.output_dir / f"recording_{ts}.wav"
+            stem = f"{safe}_{ts}" if safe else f"recording_{ts}"
+        else:
+            stem = f"recording_{ts}"
+        folder = self.output_dir / stem
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / f"{stem}.wav"
 
     def start(self, max_duration_minutes=None, name=None):
         """Begin recording system audio."""
@@ -454,14 +470,13 @@ def recording_setup(config, recorder):
 
 # ─── Transcription ────────────────────────────────────────────────────────────
 
-def transcribe_file(filepath, model_name="base"):
-    """Transcribe a WAV file using OpenAI Whisper (local)."""
+def transcribe_file(filepath, model_name="base", start_time=None, end_time=None):
+    """Transcribe a WAV file using faster-whisper (CTranslate2)."""
     try:
-        import whisper
+        from faster_whisper import WhisperModel  # noqa: F401
     except ImportError:
-        print("\n[ERROR] Whisper not installed.")
-        print("Install with:  pip install openai-whisper")
-        print("Or use:        pip install faster-whisper  (for GPU-accelerated)")
+        print("\n[ERROR] faster-whisper not installed.")
+        print("Install with:  pip install faster-whisper")
         return None
 
     filepath = Path(filepath)
@@ -469,48 +484,231 @@ def transcribe_file(filepath, model_name="base"):
         print(f"[ERROR] File not found: {filepath}")
         return None
 
-    print(f"\n  ⟳ Loading Whisper model '{model_name}'...")
-    model = whisper.load_model(model_name)
-
-    print(f"  ⟳ Transcribing {filepath.name}...")
-    start = time.time()
-    result = model.transcribe(str(filepath), verbose=False)
-    elapsed = time.time() - start
-
-    # Speaker diarization (if enabled)
     config = load_config()
-    diarized = False
-    segments = result["segments"]
+    total_start = time.time()
+    steps = []
+    diarization_on = config.get("diarization_enabled", False)
+    print(f"\n  ── Transcription starting ──")
+    print(f"  File:         {filepath.name}")
+    print(f"  Whisper model: {model_name}")
+    lang_setting = config.get("language")
+    print(f"  Language:     {lang_setting.upper() if lang_setting else 'auto-detect'}")
+    print(f"  Diarization:  {'ON (speakers will be identified)' if diarization_on else 'OFF'}")
+    if start_time is not None or end_time is not None:
+        total_dur = get_wav_duration(filepath)
+        actual_start = start_time if start_time is not None else 0
+        actual_end = end_time if end_time is not None else total_dur
+        print(f"  Range:        {format_duration(actual_start)} – {format_duration(actual_end)} (of {format_duration(total_dur)})")
+    print()
 
-    if config.get("diarization_enabled"):
+    # --- Step: Load Whisper model ---
+    print(f"  ⟳ Loading Whisper model '{model_name}' (downloading on first use, may take a few minutes)...")
+    from whisper_loader import load_whisper_model, transcribe_audio
+
+    def _print_load_progress(pct):
+        bar_len = 30
+        filled = int(bar_len * pct)
+        bar = '█' * filled + '░' * (bar_len - filled)
+        print(f"\r    [{bar}] {pct*100:5.1f}% loading model weights  ", end="", flush=True)
+
+    t = time.time()
+    model = load_whisper_model(model_name, progress_callback=_print_load_progress)
+    steps.append({"name": "Load Whisper model", "seconds": round(time.time() - t, 1)})
+    print(f"\r  ✓ Whisper model '{model_name}' ready.{' ' * 40}")
+
+    # --- Step: Trim audio (if partial) ---
+    audio_path = filepath
+    temp_path = None
+    time_offset = 0
+    if start_time is not None or end_time is not None:
+        t = time.time()
+        total_dur = get_wav_duration(filepath)
+        actual_start = start_time if start_time is not None else 0
+        actual_end = end_time if end_time is not None else total_dur
+        print(f"  ⟳ Trimming audio to {format_duration(actual_start)} – {format_duration(actual_end)}...")
+        temp_path = trim_wav_to_temp(filepath, actual_start, actual_end)
+        audio_path = temp_path
+        time_offset = actual_start
+        steps.append({"name": "Trim audio", "seconds": round(time.time() - t, 1)})
+
+    # Build transcribe kwargs
+    transcribe_kwargs = {}
+    vocab = config.get("vocabulary_terms", "")
+    if vocab and vocab.strip():
+        terms = vocab.strip()
+        print(f"  ✓ Using custom vocabulary hints ({len(terms.split(','))} terms)")
+        transcribe_kwargs["hotwords"] = terms
+        prompt = f"Terms: {terms}."
+        if len(prompt) > 200:
+            prompt = prompt[:200]
+        transcribe_kwargs["initial_prompt"] = prompt
+
+    lang = config.get("language")
+    if lang:
+        transcribe_kwargs["language"] = lang
+
+    # --- Step: Load diarization model (if needed) ---
+    diarize_available = False
+    if diarization_on:
         from diarize import is_diarization_available
         if not is_diarization_available():
-            print("  [WARN] Diarization enabled but pyannote.audio not installed. Skipping.")
+            print("  [WARN] Speaker diarization is enabled but pyannote.audio is not installed.")
+            print("         Install it with: pip install pyannote.audio")
+            print("         Skipping diarization — transcription will not have speaker labels.")
         else:
-            print(f"  ⟳ Identifying speakers...")
+            from diarize import preload_pipeline
+            print(f"  ⟳ Preloading diarization model...")
+            t = time.time()
+            preload_pipeline(
+                hf_token=config.get("hf_token"),
+                status_callback=lambda msg: print(f"    ⟳ {msg}"),
+            )
+            steps.append({"name": "Load diarization model", "seconds": round(time.time() - t, 1)})
+            diarize_available = True
+
+    # --- Parallel execution: transcription + diarization ---
+    if diarize_available:
+        from concurrent.futures import ThreadPoolExecutor
+        from diarize import (
+            diarize_audio,
+            merge_transcription_with_diarization,
+            normalize_speaker_labels,
+            normalize_speaker_labels_with_profiles,
+            get_speaker_list,
+            format_txt_with_speakers,
+            format_srt_with_speakers,
+            load_profiles,
+        )
+
+        print(f"  ⟳ Running transcription + diarization in parallel...")
+        _print_lock = threading.Lock()
+
+        def _whisper_progress(pct):
+            elapsed = time.time() - _parallel_start
+            eta = (elapsed / pct - elapsed) if pct > 0.01 else 0
+            bar_len = 30
+            filled = int(bar_len * pct)
+            bar = '█' * filled + '░' * (bar_len - filled)
+            el_m, el_s = int(elapsed // 60), int(elapsed % 60)
+            eta_m, eta_s = int(eta // 60), int(eta % 60)
+            with _print_lock:
+                print(f"\r  [Whisper ] [{bar}] {pct*100:5.1f}% | {el_m}:{el_s:02d} elapsed | ETA: {eta_m}:{eta_s:02d}  ", end="", flush=True)
+
+        _diarize_has_bar = [False]
+
+        def _diarize_status(msg):
+            with _print_lock:
+                if _diarize_has_bar[0]:
+                    print()
+                    _diarize_has_bar[0] = False
+                print(f"  [Diarize ] {msg}")
+
+        def _diarize_progress(pct, step):
+            with _print_lock:
+                filled = int(pct / 100 * 20)
+                bar = '█' * filled + '░' * (20 - filled)
+                print(f"\r  [Diarize ] [{bar}] {pct:5.1f}% — {step}  ", end="", flush=True)
+                _diarize_has_bar[0] = True
+
+        def _run_whisper():
+            return transcribe_audio(model, audio_path, progress_callback=_whisper_progress, **transcribe_kwargs)
+
+        def _run_diarize():
+            return diarize_audio(
+                str(audio_path),
+                hf_token=config.get("hf_token"),
+                max_speakers=config.get("diarization_max_speakers"),
+                status_callback=_diarize_status,
+                progress_callback=_diarize_progress,
+            )
+
+        # --- Steps: Transcription + Diarization (parallel) ---
+        _parallel_start = time.time()
+        _whisper_start = time.time()
+        _diarize_start = time.time()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            whisper_future = executor.submit(_run_whisper)
+            diarize_future = executor.submit(_run_diarize)
+
+            result = whisper_future.result()
+            _whisper_elapsed = round(time.time() - _whisper_start, 1)
+            steps.append({"name": "Transcription", "seconds": _whisper_elapsed})
+            with _print_lock:
+                print(f"\n  ✓ Transcription finished in {_whisper_elapsed}s")
+
             try:
-                from diarize import (
-                    diarize_audio,
-                    merge_transcription_with_diarization,
-                    normalize_speaker_labels,
-                    get_speaker_list,
-                    format_txt_with_speakers,
-                    format_srt_with_speakers,
-                )
-                turns = diarize_audio(
-                    str(filepath),
+                turns = diarize_future.result()
+                _diarize_elapsed = round(time.time() - _diarize_start, 1)
+                steps.append({"name": "Diarization", "seconds": _diarize_elapsed})
+                with _print_lock:
+                    if _diarize_has_bar[0]:
+                        print()
+                    print(f"  ✓ Diarization finished in {_diarize_elapsed}s")
+            except Exception as e:
+                with _print_lock:
+                    if _diarize_has_bar[0]:
+                        print()
+                    print(f"  [WARN] Speaker diarization failed: {e}")
+                    print(f"         Saving transcription without speaker labels.")
+                turns = None
+
+        diarized = False
+        segments = result["segments"]
+
+        if turns is not None:
+            # --- Step: Merge speaker labels ---
+            print(f"  ⟳ Merging speaker labels with transcription...")
+            t = time.time()
+            segments = merge_transcription_with_diarization(segments, turns)
+
+            profiles = load_profiles()
+            if profiles:
+                print(f"  ⟳ Matching speakers against {len(profiles)} enrolled profile(s)...")
+                segments, speakers, _ = normalize_speaker_labels_with_profiles(
+                    segments, turns, str(audio_path),
                     hf_token=config.get("hf_token"),
-                    max_speakers=config.get("diarization_max_speakers"),
+                    status_callback=lambda msg: print(f"    ⟳ {msg}"),
                 )
-                segments = merge_transcription_with_diarization(segments, turns)
+            else:
                 segments = normalize_speaker_labels(segments)
                 speakers = get_speaker_list(segments)
-                diarized = True
-                print(f"  ✓ Identified {len(speakers)} speaker(s): {', '.join(speakers)}")
-            except Exception as e:
-                print(f"  [WARN] Diarization failed: {e}. Saving without speaker labels.")
+            steps.append({"name": "Merge speaker labels", "seconds": round(time.time() - t, 1)})
+            diarized = True
+            print(f"  ✓ Diarization complete — identified {len(speakers)} speaker(s): {', '.join(speakers)}")
+    else:
+        # --- Sequential: transcription only ---
+        print(f"  ⟳ Transcribing {filepath.name}...")
 
-    # Save transcript
+        def _whisper_progress_seq(pct):
+            elapsed = time.time() - _seq_start
+            eta = (elapsed / pct - elapsed) if pct > 0.01 else 0
+            bar_len = 30
+            filled = int(bar_len * pct)
+            bar = '█' * filled + '░' * (bar_len - filled)
+            el_m, el_s = int(elapsed // 60), int(elapsed % 60)
+            eta_m, eta_s = int(eta // 60), int(eta % 60)
+            print(f"\r  [{bar}] {pct*100:5.1f}% | {el_m}:{el_s:02d} elapsed | ETA: {eta_m}:{eta_s:02d}  ", end="", flush=True)
+
+        _seq_start = time.time()
+        result = transcribe_audio(model, audio_path, progress_callback=_whisper_progress_seq, **transcribe_kwargs)
+        steps.append({"name": "Transcription", "seconds": round(time.time() - _seq_start, 1)})
+        print()  # newline after progress bar
+
+        diarized = False
+        segments = result["segments"]
+
+    # Offset timestamps for partial transcription
+    if time_offset > 0:
+        for seg in segments:
+            seg["start"] += time_offset
+            seg["end"] += time_offset
+
+    # Clean up temp file
+    if temp_path is not None and temp_path.exists():
+        temp_path.unlink()
+
+    # --- Step: Save outputs ---
+    t = time.time()
     txt_path = filepath.with_suffix(".txt")
     srt_path = filepath.with_suffix(".srt")
 
@@ -532,9 +730,41 @@ def transcribe_file(filepath, model_name="base"):
                 text = seg["text"].strip()
                 f.write(f"{i}\n{start_ts} --> {end_ts}\n{text}\n\n")
 
-    print(f"  ✓ Transcription complete in {elapsed:.1f}s")
+    # JSON (structured output with timing)
+    total_seconds = round(time.time() - total_start, 1)
+    json_path = filepath.with_suffix(".json")
+    timing = {
+        "total_seconds": total_seconds,
+        "model": model_name,
+        "steps": steps,
+    }
+    json_export = {
+        "text": result["text"].strip(),
+        "language": result.get("language", "unknown"),
+        "timing": timing,
+        "segments": [
+            {
+                "id": s.get("id", i),
+                "start": s["start"],
+                "end": s["end"],
+                "text": s["text"].strip(),
+                **({"speaker": s["speaker"]} if diarized else {}),
+            }
+            for i, s in enumerate(segments)
+        ],
+    }
+    if diarized:
+        json_export["speakers"] = [s["speaker"] for s in segments if "speaker" in s]
+        seen = set()
+        json_export["speakers"] = [x for x in json_export["speakers"] if not (x in seen or seen.add(x))]
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(json_export, f, indent=2, ensure_ascii=False)
+    steps.append({"name": "Save outputs", "seconds": round(time.time() - t, 1)})
+
+    print(f"  ✓ Transcription complete in {total_seconds}s")
     print(f"  ✓ Text saved: {txt_path}")
     print(f"  ✓ SRT saved:  {srt_path}")
+    print(f"  ✓ JSON saved: {json_path}")
     print(f"  ✓ Language detected: {result.get('language', 'unknown')}")
 
     return result
@@ -549,35 +779,100 @@ def format_srt_time(seconds):
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def get_wav_duration(filepath):
+    """Get duration of a WAV file in seconds."""
+    filepath = Path(filepath)
+    with wave.open(str(filepath), 'rb') as wf:
+        return wf.getnframes() / wf.getframerate()
+
+
+def trim_wav_to_temp(filepath, start_time, end_time):
+    """Create a temporary trimmed WAV file. Returns the temp file path."""
+    import tempfile
+    filepath = Path(filepath)
+    with wave.open(str(filepath), 'rb') as wf:
+        rate = wf.getframerate()
+        channels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        total_frames = wf.getnframes()
+        start_frame = max(0, int(start_time * rate))
+        end_frame = min(total_frames, int(end_time * rate))
+        wf.setpos(start_frame)
+        frames = wf.readframes(end_frame - start_frame)
+
+    fd, tmp_name = tempfile.mkstemp(suffix='.wav')
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+
+    with wave.open(str(tmp_path), 'wb') as out:
+        out.setnchannels(channels)
+        out.setsampwidth(sampwidth)
+        out.setframerate(rate)
+        out.writeframes(frames)
+
+    return tmp_path
+
+
+def parse_time_input(s):
+    """Parse a time string (SS, MM:SS, or HH:MM:SS) to seconds."""
+    parts = s.strip().split(":")
+    try:
+        if len(parts) == 1:
+            return float(parts[0])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        elif len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    except ValueError:
+        pass
+    return None
+
+
 def rename_recording(filepath, new_name):
-    """Rename a recording and all associated files (.wav, .txt, .srt, .json)."""
+    """Rename a recording, its associated files, and subfolder if applicable."""
     filepath = Path(filepath)
     if not filepath.exists():
         print(f"  [ERROR] File not found: {filepath}")
         return None
-    # Sanitize new name
     safe = "".join(c for c in new_name if c.isalnum() or c in " -_").strip()
     if not safe:
         print("  [ERROR] Invalid name.")
         return None
-    new_stem = safe
-    parent = filepath.parent
-    # Check for collision
-    if (parent / f"{new_stem}.wav").exists():
-        print(f"  [ERROR] A recording named '{new_stem}.wav' already exists.")
+
+    old_stem = filepath.stem
+    old_parent = filepath.parent
+    # Determine recordings root (one level up if in subfolder, same dir if flat)
+    is_subfolder = old_parent.name == old_stem
+    rec_root = old_parent.parent if is_subfolder else old_parent
+
+    new_folder = rec_root / safe
+    if new_folder.exists():
+        print(f"  [ERROR] A recording named '{safe}' already exists.")
         return None
+
     renamed = []
-    for ext in (".wav", ".txt", ".srt", ".json"):
-        old = filepath.with_suffix(ext)
-        if old.exists():
-            new_path = parent / f"{new_stem}{ext}"
-            old.rename(new_path)
-            renamed.append((old.name, new_path.name))
+    if is_subfolder:
+        old_parent.rename(new_folder)
+        for ext in (".wav", ".txt", ".srt", ".json"):
+            old_file = new_folder / f"{old_stem}{ext}"
+            if old_file.exists():
+                new_file = new_folder / f"{safe}{ext}"
+                old_file.rename(new_file)
+                renamed.append((f"{old_stem}{ext}", f"{safe}{ext}"))
+    else:
+        new_folder.mkdir(parents=True, exist_ok=True)
+        for ext in (".wav", ".txt", ".srt", ".json"):
+            old_file = old_parent / f"{old_stem}{ext}"
+            if old_file.exists():
+                new_file = new_folder / f"{safe}{ext}"
+                old_file.rename(new_file)
+                renamed.append((old_file.name, new_file.name))
+
     if renamed:
         print(f"  Renamed {len(renamed)} file(s):")
-        for old_name, nn in renamed:
-            print(f"    {old_name} -> {nn}")
-    return parent / f"{new_stem}.wav"
+        for old_n, new_n in renamed:
+            print(f"    {old_n} -> {new_n}")
+    return new_folder / f"{safe}.wav"
 
 
 # ─── Interactive CLI ──────────────────────────────────────────────────────────
@@ -661,7 +956,7 @@ def interactive_mode():
 
             elif choice == "t":
                 # List available recordings
-                recordings = sorted(Path(config["output_dir"]).glob("*.wav"))
+                recordings = sorted(Path(config["output_dir"]).glob("**/*.wav"))
                 if not recordings:
                     print("  No recordings found.\n")
                     continue
@@ -676,11 +971,30 @@ def interactive_mode():
                     target = Path(idx)
                 model = input(f"  Whisper model [{config.get('whisper_model', 'base')}]: ").strip()
                 model = model or config.get("whisper_model", "base")
-                transcribe_file(target, model)
+                # Partial transcription option
+                st, et = None, None
+                try:
+                    dur = get_wav_duration(target)
+                    print(f"\n  Duration: {format_duration(dur)}")
+                    partial = input("  Transcribe [f]ull or [s]egment? (f): ").strip().lower()
+                    if partial == "s":
+                        s_in = input(f"  Start time (MM:SS or seconds, default 0): ").strip()
+                        if s_in:
+                            st = parse_time_input(s_in)
+                            if st is None:
+                                print("  Invalid time format.")
+                        e_in = input(f"  End time (MM:SS or seconds, default {format_duration(dur)}): ").strip()
+                        if e_in:
+                            et = parse_time_input(e_in)
+                            if et is None:
+                                print("  Invalid time format.")
+                except Exception:
+                    pass
+                transcribe_file(target, model, start_time=st, end_time=et)
 
             elif choice == "n":
                 # Rename a recording
-                recordings = sorted(Path(config["output_dir"]).glob("*.wav"))
+                recordings = sorted(Path(config["output_dir"]).glob("**/*.wav"))
                 if not recordings:
                     print("  No recordings found.\n")
                     continue
@@ -702,7 +1016,7 @@ def interactive_mode():
             elif choice == "l":
                 # List recordings that have a transcription
                 out_dir = Path(config["output_dir"])
-                transcripts = sorted(out_dir.glob("*.txt"))
+                transcripts = sorted(out_dir.glob("**/*.txt"))
                 if not transcripts:
                     print("  No transcriptions found.\n")
                     continue
@@ -753,7 +1067,7 @@ def interactive_mode():
                     config["auto_transcribe"] = True
                 elif auto.lower() in ("n", "no"):
                     config["auto_transcribe"] = False
-                wmodel = input(f"  Whisper model (tiny/base/small/medium/large) [{config['whisper_model']}]: ").strip()
+                wmodel = input(f"  Whisper model (tiny/base/small/medium/large/turbo) [{config['whisper_model']}]:").strip()
                 if wmodel:
                     config["whisper_model"] = wmodel
                 dev = input(f"  Device index (number or 'auto') [{config.get('device_index', 'auto')}]: ").strip()
@@ -836,7 +1150,7 @@ def main():
         "--model",
         type=str,
         default=None,
-        help="Whisper model to use (tiny/base/small/medium/large)",
+        help="Whisper model to use (tiny/base/small/medium/large/turbo)",
     )
     parser.add_argument(
         "--output-dir",
@@ -856,6 +1170,18 @@ def main():
         default=None,
         help="Custom name for the recording",
     )
+    parser.add_argument(
+        "--start-time",
+        type=float,
+        default=None,
+        help="Start time in seconds for partial transcription",
+    )
+    parser.add_argument(
+        "--end-time",
+        type=float,
+        default=None,
+        help="End time in seconds for partial transcription",
+    )
 
     args = parser.parse_args()
 
@@ -866,7 +1192,7 @@ def main():
     if args.transcribe:
         config = load_config()
         model = args.model or config.get("whisper_model", "base")
-        transcribe_file(args.transcribe, model)
+        transcribe_file(args.transcribe, model, start_time=args.start_time, end_time=args.end_time)
         return
 
     if args.record is not None:
