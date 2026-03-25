@@ -533,14 +533,24 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
 
     # Build transcribe kwargs
     transcribe_kwargs = {}
+
+    # Hotwords: only a small set of high-value terms that bias decoding.
+    # Large hotword lists cause severe hallucination (the model "hears" them
+    # even on clear speech).  Keep this tiny.
+    hotwords = config.get("hotwords", "Task")
+    if hotwords and hotwords.strip():
+        transcribe_kwargs["hotwords"] = hotwords.strip()
+
+    # Vocabulary terms go into initial_prompt only — gentle contextual
+    # conditioning, not aggressive token biasing like hotwords.
     vocab = config.get("vocabulary_terms", "")
     if vocab and vocab.strip():
         terms = vocab.strip()
-        print(f"  ✓ Using custom vocabulary hints ({len(terms.split(','))} terms)")
-        transcribe_kwargs["hotwords"] = terms
-        prompt = f"Terms: {terms}."
-        if len(prompt) > 200:
-            prompt = prompt[:200]
+        term_count = len(terms.split(","))
+        print(f"  ✓ Using vocabulary context ({term_count} terms)")
+        prompt = f"Technical meeting transcript. Terms: {terms}."
+        if len(prompt) > 500:
+            prompt = prompt[:500]
         transcribe_kwargs["initial_prompt"] = prompt
 
     lang = config.get("language")

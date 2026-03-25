@@ -558,15 +558,22 @@ def _transcribe_worker(filename, model_name, start_time=None, end_time=None):
 
         # Build transcribe kwargs
         transcribe_kwargs = {}
+
+        # Hotwords: only a small set of high-value terms that bias decoding.
+        # Large hotword lists cause severe hallucination (the model "hears" them
+        # even on clear speech).  Keep this tiny.
+        hotwords = config.get("hotwords", "Task")
+        if hotwords and hotwords.strip():
+            transcribe_kwargs["hotwords"] = hotwords.strip()
+
+        # Vocabulary terms go into initial_prompt only — gentle contextual
+        # conditioning, not aggressive token biasing like hotwords.
         vocab = config.get("vocabulary_terms", "")
         if vocab and vocab.strip():
             terms = vocab.strip()
-            # hotwords directly boosts word probability during decoding (faster-whisper feature)
-            transcribe_kwargs["hotwords"] = terms
-            # initial_prompt provides context but must stay short (448 token decoder limit)
-            prompt = f"Terms: {terms}."
-            if len(prompt) > 200:
-                prompt = prompt[:200]
+            prompt = f"Technical meeting transcript. Terms: {terms}."
+            if len(prompt) > 500:
+                prompt = prompt[:500]
             transcribe_kwargs["initial_prompt"] = prompt
 
         lang = config.get("language")
@@ -927,7 +934,7 @@ def update_settings():
     allowed_keys = {
         "output_dir", "auto_transcribe", "whisper_model", "device_index",
         "diarization_enabled", "hf_token", "diarization_max_speakers",
-        "vocabulary_terms", "language",
+        "vocabulary_terms", "hotwords", "language",
     }
     for key in allowed_keys:
         if key in data:

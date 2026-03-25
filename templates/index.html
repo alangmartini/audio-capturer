@@ -889,14 +889,34 @@
 
   <div class="card">
     <h3>Vocabulary Hints</h3>
+    <div class="help-text" style="margin-bottom:16px;">Two ways to help Whisper recognize your terminology. They work differently — use both for best results.</div>
+
     <div class="setting-group">
-      <label for="set-vocabulary">Custom terms (comma-separated)</label>
-      <textarea id="set-vocabulary" rows="6" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;width:100%;outline:none;resize:vertical;font-family:inherit;" placeholder="VPN, DNS, Kubernetes, ..."></textarea>
-      <div class="help-text">Jargon, acronyms, and technical terms that Whisper should recognize. These are passed as context hints to improve transcription accuracy for domain-specific vocabulary.</div>
+      <label for="set-vocabulary" style="display:flex; align-items:center; gap:8px;">
+        Custom Terms (comma-separated)
+        <span style="font-size:11px; font-weight:400; color:var(--text2); background:var(--surface2); padding:2px 8px; border-radius:10px;">context hints</span>
+      </label>
+      <textarea id="set-vocabulary" rows="6" oninput="updateVocabCount()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;width:100%;outline:none;resize:vertical;font-family:inherit;" placeholder="VPN, DNS, Kubernetes, ..."></textarea>
+      <div class="help-text">A large list of jargon, acronyms, and technical terms from your domain. These are injected as context in the prompt so Whisper knows the kind of language to expect. Safe to add hundreds of terms — they provide gentle conditioning without side effects.</div>
       <div style="margin-top:8px; display:flex; gap:8px;">
         <button class="btn btn-ghost btn-sm" onclick="resetVocabularyDefaults()">Reset to Defaults</button>
         <span id="vocab-count" style="font-size:12px; color:var(--text2); align-self:center;"></span>
       </div>
+    </div>
+
+    <hr style="border:none; border-top:1px solid var(--border); margin:16px 0;">
+
+    <div class="setting-group">
+      <label for="set-hotwords" style="display:flex; align-items:center; gap:8px;">
+        Hotwords
+        <span style="font-size:11px; font-weight:400; color:var(--text2); background:var(--surface2); padding:2px 8px; border-radius:10px;">decoder bias</span>
+      </label>
+      <input type="text" id="set-hotwords" oninput="updateHotwordCount()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;width:100%;outline:none;font-family:inherit;" placeholder="e.g. Kubernetes, NTT DATA">
+      <div class="help-text">A <strong>small</strong> set of high-value words that the model aggressively biases toward during decoding. Use this for terms that are consistently mis-transcribed even with custom terms above (e.g. uncommon proper nouns, product names).</div>
+      <div class="help-text" style="margin-top:6px; padding:8px 12px; background:var(--surface2); border-radius:var(--radius); border-left:3px solid #e8a735;">
+        <strong>Keep this short</strong> (under ~10 terms). Large hotword lists cause hallucination — the model will "hear" these words even in silence or unrelated speech. When in doubt, add terms to Custom Terms above instead.
+      </div>
+      <span id="hotword-count" style="font-size:12px; color:var(--text2); margin-top:6px; display:block;"></span>
     </div>
   </div>
 
@@ -1635,6 +1655,21 @@ function updateVocabCount() {
   document.getElementById('vocab-count').textContent = count > 0 ? `${count} terms` : '';
 }
 
+function updateHotwordCount() {
+  const hw = document.getElementById('set-hotwords').value.trim();
+  const count = hw ? hw.split(',').filter(t => t.trim()).length : 0;
+  const el = document.getElementById('hotword-count');
+  if (count === 0) {
+    el.textContent = '';
+  } else if (count > 10) {
+    el.textContent = `${count} hotwords — too many, risk of hallucination`;
+    el.style.color = '#e05252';
+  } else {
+    el.textContent = `${count} hotword${count !== 1 ? 's' : ''}`;
+    el.style.color = 'var(--text2)';
+  }
+}
+
 // ─── Settings ─────────────────────────────────────────────────────────────
 async function loadSettings() {
   const data = await apiCall('/api/settings');
@@ -1653,6 +1688,11 @@ async function loadSettings() {
     vocabEl.value = DEFAULT_VOCABULARY;
   }
   updateVocabCount();
+
+  // Hotwords
+  const hotwordsEl = document.getElementById('set-hotwords');
+  hotwordsEl.value = s.hotwords || '';
+  updateHotwordCount();
 
   // Diarization settings
   document.getElementById('set-diarization').checked = !!s.diarization_enabled;
@@ -1706,6 +1746,7 @@ async function saveSettings() {
     hf_token: document.getElementById('set-hf-token').value || null,
     diarization_max_speakers: maxSpeakers ? parseInt(maxSpeakers) : null,
     vocabulary_terms: document.getElementById('set-vocabulary').value.trim() || null,
+    hotwords: document.getElementById('set-hotwords').value.trim() || null,
   };
   const data = await apiCall('/api/settings', {
     method: 'PUT',

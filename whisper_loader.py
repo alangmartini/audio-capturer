@@ -30,7 +30,7 @@ def load_whisper_model(model_name, progress_callback=None):
     from faster_whisper import WhisperModel
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    compute_type = "float16" if device == "cuda" else "int8"
+    compute_type = "float16" if device == "cuda" else "int16"
 
     if progress_callback:
         progress_callback(0.0)
