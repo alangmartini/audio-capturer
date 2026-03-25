@@ -18,13 +18,19 @@ import time
 import traceback
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from flask import Flask, jsonify, render_template, request, send_file
 
 from capture import (
     SystemAudioRecorder,
     format_srt_time,
+    get_wav_duration,
     load_config,
+    resolve_wav,
     save_config,
+    trim_wav_to_temp,
 )
 
 try:
@@ -41,11 +47,15 @@ _recorder_lock = threading.Lock()
 
 _transcription = {
     "active": False,
-    "stage": "idle",       # idle / loading_model / transcribing / diarizing / saving / done / error
+    "stage": "idle",       # idle / loading_model / transcribing / diarizing / diarize_merging / saving / done / error
     "filename": None,
     "model": None,
     "error": None,
     "progress": None,
+    "diarize_detail": None,
+    "diarize_progress": None,
+    "diarization_enabled": False,
+    "started_at": None,
 }
 _transcription_lock = threading.Lock()
 
@@ -269,7 +279,7 @@ def list_recordings():
         return jsonify({"recordings": []})
 
     recordings = []
-    for wav in sorted(out_dir.glob("*.wav"), reverse=True):
+    for wav in sorted(out_dir.glob("**/*.wav"), key=lambda p: p.stat().st_mtime, reverse=True):
         stat = wav.stat()
         entry = {
             "name": wav.name,
@@ -281,9 +291,27 @@ def list_recordings():
             t = wav.with_suffix(ext)
             if t.exists():
                 entry["transcripts"][ext.lstrip(".")] = True
+        # Read timing from JSON export if available
+        json_path = wav.with_suffix(".json")
+        if json_path.exists():
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    jdata = json.load(f)
+                if "timing" in jdata:
+                    entry["timing"] = jdata["timing"]
+            except Exception:
+                pass
         recordings.append(entry)
 
     return jsonify({"recordings": recordings})
+
+
+@app.route("/api/recordings/open-folder", methods=["POST"])
+def open_recordings_folder():
+    out_dir = _get_output_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    os.startfile(str(out_dir))
+    return jsonify({"ok": True, "path": str(out_dir)})
 
 
 @app.route("/api/recordings/<name>/transcript")
@@ -293,7 +321,7 @@ def get_transcript(name):
         return jsonify({"ok": False, "error": f"Invalid format: {fmt}"}), 400
 
     out_dir = _get_output_dir()
-    wav_path = out_dir / name
+    wav_path = resolve_wav(out_dir, name)
     transcript_path = wav_path.with_suffix(f".{fmt}")
 
     if not transcript_path.exists():
@@ -312,7 +340,7 @@ def download_recording(name):
         return jsonify({"ok": False, "error": f"Invalid format: {fmt}"}), 400
 
     out_dir = _get_output_dir()
-    wav_path = out_dir / name
+    wav_path = resolve_wav(out_dir, name)
 
     if fmt == "wav":
         target = wav_path
@@ -325,13 +353,23 @@ def download_recording(name):
     return send_file(str(target), as_attachment=True)
 
 
+@app.route("/api/recordings/<name>/duration")
+def get_duration(name):
+    out_dir = _get_output_dir()
+    wav_path = resolve_wav(out_dir, name)
+    if not wav_path.exists():
+        return jsonify({"ok": False, "error": f"File not found: {name}"}), 404
+    duration = get_wav_duration(wav_path)
+    return jsonify({"ok": True, "duration": duration})
+
+
 @app.route("/api/recordings/<name>", methods=["DELETE"])
 def delete_recording(name):
     out_dir = _get_output_dir()
-    wav_path = out_dir / name
+    wav_path = resolve_wav(out_dir, name)
 
     # Prevent path traversal
-    if not wav_path.resolve().parent == out_dir.resolve():
+    if not wav_path.resolve().is_relative_to(out_dir.resolve()):
         return jsonify({"ok": False, "error": "Invalid filename"}), 400
 
     deleted = []
@@ -343,6 +381,11 @@ def delete_recording(name):
 
     if not deleted:
         return jsonify({"ok": False, "error": "No files found to delete"}), 404
+
+    # Remove empty subfolder if applicable
+    parent = wav_path.parent
+    if parent != out_dir and parent.exists() and not any(parent.iterdir()):
+        parent.rmdir()
 
     return jsonify({"ok": True, "deleted": deleted})
 
@@ -360,34 +403,49 @@ def rename_recording(name):
         return jsonify({"ok": False, "error": "Invalid name (use alphanumeric, spaces, hyphens, underscores)"}), 400
 
     out_dir = _get_output_dir()
-    wav_path = out_dir / name
+    wav_path = resolve_wav(out_dir, name)
 
     # Prevent path traversal
-    if not wav_path.resolve().parent == out_dir.resolve():
+    if not wav_path.resolve().is_relative_to(out_dir.resolve()):
         return jsonify({"ok": False, "error": "Invalid filename"}), 400
 
     if not wav_path.exists():
         return jsonify({"ok": False, "error": f"Recording not found: {name}"}), 404
 
-    new_wav = out_dir / f"{safe}.wav"
-    if new_wav.exists():
-        return jsonify({"ok": False, "error": f"A recording named '{safe}.wav' already exists"}), 409
+    new_folder = out_dir / safe
+    if new_folder.exists():
+        return jsonify({"ok": False, "error": f"A recording named '{safe}' already exists"}), 409
+
+    old_stem = wav_path.stem
+    old_parent = wav_path.parent
+    is_subfolder = (old_parent.name == old_stem and old_parent.parent.resolve() == out_dir.resolve())
 
     renamed = []
-    for ext in (".wav", ".txt", ".srt", ".json"):
-        old = wav_path.with_suffix(ext)
-        if old.exists():
-            new_path = out_dir / f"{safe}{ext}"
-            old.rename(new_path)
-            renamed.append({"old": old.name, "new": new_path.name})
+    if is_subfolder:
+        old_parent.rename(new_folder)
+        for ext in (".wav", ".txt", ".srt", ".json"):
+            old_file = new_folder / f"{old_stem}{ext}"
+            if old_file.exists():
+                new_file = new_folder / f"{safe}{ext}"
+                old_file.rename(new_file)
+                renamed.append({"old": f"{old_stem}{ext}", "new": f"{safe}{ext}"})
+    else:
+        new_folder.mkdir(parents=True, exist_ok=True)
+        for ext in (".wav", ".txt", ".srt", ".json"):
+            old_file = old_parent / f"{old_stem}{ext}"
+            if old_file.exists():
+                new_file = new_folder / f"{safe}{ext}"
+                old_file.rename(new_file)
+                renamed.append({"old": old_file.name, "new": new_file.name})
 
     return jsonify({"ok": True, "renamed": renamed, "new_name": f"{safe}.wav"})
 
 
 # ─── Transcription ────────────────────────────────────────────────────────────
 
-def _start_transcription(filename, model_name):
+def _start_transcription(filename, model_name, start_time=None, end_time=None):
     """Launch background transcription thread."""
+    config = load_config()
     with _transcription_lock:
         if _transcription["active"]:
             return False
@@ -398,9 +456,11 @@ def _start_transcription(filename, model_name):
             "model": model_name,
             "error": None,
             "progress": None,
+            "diarize_detail": None,
+            "diarization_enabled": config.get("diarization_enabled", False),
         })
 
-    t = threading.Thread(target=_transcribe_worker, args=(filename, model_name), daemon=True)
+    t = threading.Thread(target=_transcribe_worker, args=(filename, model_name, start_time, end_time), daemon=True)
     t.start()
     return True
 
@@ -428,16 +488,16 @@ def _ensure_ffmpeg():
     return False
 
 
-def _transcribe_worker(filename, model_name):
+def _transcribe_worker(filename, model_name, start_time=None, end_time=None):
     """Background transcription worker."""
     try:
-        import whisper
+        from faster_whisper import WhisperModel  # noqa: F401
     except ImportError:
         with _transcription_lock:
             _transcription.update({
                 "active": False,
                 "stage": "error",
-                "error": "Whisper not installed. Run: pip install openai-whisper",
+                "error": "faster-whisper not installed. Run: pip install faster-whisper",
             })
         return
 
@@ -451,7 +511,7 @@ def _transcribe_worker(filename, model_name):
         return
 
     out_dir = _get_output_dir()
-    filepath = out_dir / filename
+    filepath = resolve_wav(out_dir, filename)
 
     if not filepath.exists():
         with _transcription_lock:
@@ -463,49 +523,217 @@ def _transcribe_worker(filename, model_name):
         return
 
     try:
+        config = load_config()
+        total_start = time.time()
+        steps = []
+
+        # --- Step: Load Whisper model ---
         with _transcription_lock:
             _transcription["stage"] = "loading_model"
-        model = whisper.load_model(model_name)
+            _transcription["model_load_progress"] = {"percent": 0}
 
-        with _transcription_lock:
-            _transcription["stage"] = "transcribing"
-        result = model.transcribe(str(filepath), verbose=False)
+        from whisper_loader import load_whisper_model, transcribe_audio
 
-        # Speaker diarization (if enabled)
-        config = load_config()
-        diarized = False
-        segments = result["segments"]
-        speakers = []
+        def _model_load_progress(pct):
+            with _transcription_lock:
+                _transcription["model_load_progress"] = {"percent": round(pct * 100, 1)}
 
+        t = time.time()
+        model = load_whisper_model(model_name, progress_callback=_model_load_progress)
+        steps.append({"name": "Load Whisper model", "seconds": round(time.time() - t, 1)})
+
+        # --- Step: Trim audio (if partial) ---
+        audio_path = filepath
+        temp_path = None
+        time_offset = 0
+        if start_time is not None or end_time is not None:
+            t = time.time()
+            total_dur = get_wav_duration(filepath)
+            actual_start = start_time if start_time is not None else 0
+            actual_end = end_time if end_time is not None else total_dur
+            temp_path = trim_wav_to_temp(filepath, actual_start, actual_end)
+            audio_path = temp_path
+            time_offset = actual_start
+            steps.append({"name": "Trim audio", "seconds": round(time.time() - t, 1)})
+
+        # Build transcribe kwargs
+        transcribe_kwargs = {}
+        vocab = config.get("vocabulary_terms", "")
+        if vocab and vocab.strip():
+            terms = vocab.strip()
+            # hotwords directly boosts word probability during decoding (faster-whisper feature)
+            transcribe_kwargs["hotwords"] = terms
+            # initial_prompt provides context but must stay short (448 token decoder limit)
+            prompt = f"Terms: {terms}."
+            if len(prompt) > 200:
+                prompt = prompt[:200]
+            transcribe_kwargs["initial_prompt"] = prompt
+
+        lang = config.get("language")
+        if lang:
+            transcribe_kwargs["language"] = lang
+
+        # Check diarization availability before starting parallel work
+        diarize_available = False
         if config.get("diarization_enabled"):
             from diarize import is_diarization_available
-            if is_diarization_available():
+            if not is_diarization_available():
                 with _transcription_lock:
-                    _transcription["stage"] = "diarizing"
-                try:
-                    from diarize import (
-                        diarize_audio,
-                        merge_transcription_with_diarization,
-                        normalize_speaker_labels,
-                        get_speaker_list,
-                        format_txt_with_speakers,
-                        format_srt_with_speakers,
-                    )
-                    turns = diarize_audio(
-                        str(filepath),
-                        hf_token=config.get("hf_token"),
-                        max_speakers=config.get("diarization_max_speakers"),
-                    )
-                    segments = merge_transcription_with_diarization(segments, turns)
-                    segments = normalize_speaker_labels(segments)
-                    speakers = get_speaker_list(segments)
-                    diarized = True
-                except Exception as e:
-                    # Diarization failed; continue without speaker labels
-                    pass
+                    _transcription.update({
+                        "active": False,
+                        "stage": "error",
+                        "error": "Diarization is enabled but pyannote.audio is not installed. "
+                                 "Run: pip install pyannote.audio",
+                    })
+                return
 
+            # --- Step: Load diarization model ---
+            with _transcription_lock:
+                _transcription["stage"] = "loading_diarize_model"
+                _transcription["diarize_detail"] = "Loading diarization model..."
+
+            from diarize import (
+                preload_pipeline,
+                diarize_audio,
+                merge_transcription_with_diarization,
+                normalize_speaker_labels,
+                normalize_speaker_labels_with_profiles,
+                get_speaker_list,
+                format_txt_with_speakers,
+                format_srt_with_speakers,
+                load_profiles,
+            )
+
+            def _preload_status(msg):
+                with _transcription_lock:
+                    _transcription["diarize_detail"] = msg
+
+            t = time.time()
+            preload_pipeline(
+                hf_token=config.get("hf_token"),
+                status_callback=_preload_status,
+            )
+            steps.append({"name": "Load diarization model", "seconds": round(time.time() - t, 1)})
+            diarize_available = True
+
+        # --- Progress callbacks ---
+        _parallel_start = time.time()
+        with _transcription_lock:
+            _transcription["started_at"] = _parallel_start
+
+        def _whisper_progress(pct):
+            elapsed = time.time() - _parallel_start
+            eta = (elapsed / pct - elapsed) if pct > 0.01 else None
+            with _transcription_lock:
+                _transcription["progress"] = {
+                    "percent": round(pct * 100, 1),
+                    "elapsed": round(elapsed),
+                    "eta": round(eta) if eta is not None else None,
+                }
+
+        if diarize_available:
+            # --- Parallel execution: transcription + diarization ---
+            from concurrent.futures import ThreadPoolExecutor
+
+            with _transcription_lock:
+                _transcription["stage"] = "processing"
+                _transcription["progress"] = {"percent": 0, "elapsed": 0, "eta": None}
+                _transcription["diarize_detail"] = "Starting speaker analysis..."
+                _transcription["diarize_progress"] = {"percent": 0}
+
+            def _diarize_status(msg):
+                with _transcription_lock:
+                    _transcription["diarize_detail"] = msg
+
+            def _diarize_progress(percent, step_label):
+                with _transcription_lock:
+                    _transcription["diarize_progress"] = {"percent": round(percent, 1)}
+                    _transcription["diarize_detail"] = f"Speaker diarization: {step_label}..."
+
+            def _run_whisper():
+                return transcribe_audio(model, audio_path, progress_callback=_whisper_progress, **transcribe_kwargs)
+
+            def _run_diarize():
+                return diarize_audio(
+                    str(audio_path),
+                    hf_token=config.get("hf_token"),
+                    max_speakers=config.get("diarization_max_speakers"),
+                    status_callback=_diarize_status,
+                    progress_callback=_diarize_progress,
+                )
+
+            # --- Steps: Transcription + Diarization (parallel) ---
+            _whisper_start = time.time()
+            _diarize_start = time.time()
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                whisper_future = executor.submit(_run_whisper)
+                diarize_future = executor.submit(_run_diarize)
+
+                result = whisper_future.result()
+                steps.append({"name": "Transcription", "seconds": round(time.time() - _whisper_start, 1)})
+                turns = diarize_future.result()
+                steps.append({"name": "Diarization", "seconds": round(time.time() - _diarize_start, 1)})
+
+            diarized = False
+            segments = result["segments"]
+            speakers = []
+
+            # --- Step: Merge speaker labels ---
+            with _transcription_lock:
+                _transcription["stage"] = "diarize_merging"
+            t = time.time()
+            segments = merge_transcription_with_diarization(segments, turns)
+
+            # Use speaker profile matching if profiles exist
+            profiles = load_profiles()
+            if profiles:
+                with _transcription_lock:
+                    _transcription["diarize_detail"] = "Matching speakers against enrolled profiles..."
+
+                def _profile_status(msg):
+                    with _transcription_lock:
+                        _transcription["diarize_detail"] = msg
+
+                segments, speakers, _ = normalize_speaker_labels_with_profiles(
+                    segments, turns, str(audio_path),
+                    hf_token=config.get("hf_token"),
+                    status_callback=_profile_status,
+                )
+                steps.append({"name": "Merge speaker labels", "seconds": round(time.time() - t, 1)})
+                # Profile matching time is included in merge step above
+            else:
+                segments = normalize_speaker_labels(segments)
+                speakers = get_speaker_list(segments)
+                steps.append({"name": "Merge speaker labels", "seconds": round(time.time() - t, 1)})
+            diarized = True
+        else:
+            # --- Sequential: transcription only ---
+            with _transcription_lock:
+                _transcription["stage"] = "transcribing"
+                _transcription["progress"] = {"percent": 0, "elapsed": 0, "eta": None}
+
+            t = time.time()
+            result = transcribe_audio(model, audio_path, progress_callback=_whisper_progress, **transcribe_kwargs)
+            steps.append({"name": "Transcription", "seconds": round(time.time() - t, 1)})
+            diarized = False
+            segments = result["segments"]
+            speakers = []
+
+        # Offset timestamps for partial transcription
+        if time_offset > 0:
+            for seg in segments:
+                seg["start"] += time_offset
+                seg["end"] += time_offset
+
+        # Clean up temp file
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+        # --- Step: Save outputs ---
         with _transcription_lock:
             _transcription["stage"] = "saving"
+
+        t = time.time()
 
         # Save .txt
         txt_path = filepath.with_suffix(".txt")
@@ -528,10 +756,17 @@ def _transcribe_worker(filename, model_name):
                     f.write(f"{i}\n{start_ts} --> {end_ts}\n{text}\n\n")
 
         # Save .json
+        total_seconds = round(time.time() - total_start, 1)
         json_path = filepath.with_suffix(".json")
+        timing = {
+            "total_seconds": total_seconds,
+            "model": model_name,
+            "steps": steps,
+        }
         json_export = {
             "text": result["text"].strip(),
             "language": result.get("language", "unknown"),
+            "timing": timing,
             "segments": [
                 {
                     "id": s.get("id", i),
@@ -545,8 +780,11 @@ def _transcribe_worker(filename, model_name):
         }
         if diarized:
             json_export["speakers"] = speakers
+
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(json_export, f, indent=2, ensure_ascii=False)
+
+        steps.append({"name": "Save outputs", "seconds": round(time.time() - t, 1)})
 
         with _transcription_lock:
             _transcription.update({
@@ -577,12 +815,14 @@ def transcribe():
 
     config = load_config()
     model = data.get("model") or config.get("whisper_model", "base")
+    start_time = data.get("start_time")
+    end_time = data.get("end_time")
 
     with _transcription_lock:
         if _transcription["active"]:
             return jsonify({"ok": False, "error": "Transcription already in progress"}), 409
 
-    ok = _start_transcription(filename, model)
+    ok = _start_transcription(filename, model, start_time, end_time)
     if not ok:
         return jsonify({"ok": False, "error": "Could not start transcription"}), 500
 
@@ -600,6 +840,11 @@ def transcribe_status():
                 "error": None,
                 "filename": None,
                 "progress": None,
+                "model_load_progress": None,
+                "diarize_detail": None,
+                "diarize_progress": None,
+                "diarization_enabled": False,
+                "started_at": None,
             })
     return jsonify(snapshot)
 
@@ -682,6 +927,7 @@ def update_settings():
     allowed_keys = {
         "output_dir", "auto_transcribe", "whisper_model", "device_index",
         "diarization_enabled", "hf_token", "diarization_max_speakers",
+        "vocabulary_terms", "language",
     }
     for key in allowed_keys:
         if key in data:
@@ -705,6 +951,567 @@ def diarization_status():
         "enabled": config.get("diarization_enabled", False),
         "has_token": bool(config.get("hf_token")),
     })
+
+
+# ─── Speaker Profiles ─────────────────────────────────────────────────────
+
+_speaker_task = {
+    "active": False,
+    "stage": "idle",  # idle / loading / diarizing / extracting / matching / enrolling / done / error
+    "detail": None,
+    "diarize_progress": None,
+    "error": None,
+    "result": None,
+}
+_speaker_task_lock = threading.Lock()
+
+
+@app.route("/api/speakers")
+def list_speakers():
+    """List all enrolled speaker profiles."""
+    from diarize import load_profiles
+    profiles = load_profiles()
+    # Strip embeddings from response (they're large)
+    summary = {}
+    for name, data in profiles.items():
+        summary[name] = {
+            "enrolled_date": data.get("enrolled_date", ""),
+            "enrolled_from": data.get("enrolled_from", ""),
+        }
+    return jsonify({"ok": True, "profiles": summary, "count": len(summary)})
+
+
+@app.route("/api/speakers/enroll", methods=["POST"])
+def enroll_speaker_endpoint():
+    """Enroll speakers from a recording.
+    Body: {"filename": "recording.wav", "assignments": {"SPEAKER_00": "John", "SPEAKER_01": "Maria"},
+           "start_time": 0, "end_time": 120}
+    """
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename")
+    assignments = data.get("assignments", {})
+    start_time = data.get("start_time")
+    end_time = data.get("end_time")
+
+    if not filename:
+        return jsonify({"ok": False, "error": "Missing 'filename'"}), 400
+    if not assignments:
+        return jsonify({"ok": False, "error": "Missing 'assignments'"}), 400
+
+    with _speaker_task_lock:
+        if _speaker_task["active"]:
+            return jsonify({"ok": False, "error": "A speaker task is already running"}), 409
+        _speaker_task.update({
+            "active": True,
+            "stage": "loading",
+            "detail": f"Starting enrollment from {filename}...",
+            "error": None,
+            "result": None,
+        })
+
+    t = threading.Thread(
+        target=_enroll_worker, args=(filename, assignments, start_time, end_time), daemon=True
+    )
+    t.start()
+    return jsonify({"ok": True})
+
+
+def _enroll_worker(filename, assignments, start_time=None, end_time=None):
+    """Background worker for speaker enrollment."""
+    try:
+        from diarize import (
+            is_diarization_available,
+            diarize_audio,
+            extract_speaker_embeddings,
+            enroll_speaker,
+        )
+
+        if not is_diarization_available():
+            with _speaker_task_lock:
+                _speaker_task.update({
+                    "active": False,
+                    "stage": "error",
+                    "error": "pyannote.audio is not installed",
+                })
+            return
+
+        config = load_config()
+        out_dir = _get_output_dir()
+        filepath = resolve_wav(out_dir, filename)
+
+        if not filepath.exists():
+            with _speaker_task_lock:
+                _speaker_task.update({
+                    "active": False,
+                    "stage": "error",
+                    "error": f"File not found: {filename}",
+                })
+            return
+
+        def _status(msg):
+            with _speaker_task_lock:
+                _speaker_task["detail"] = msg
+
+        def _diarize_prog(percent, step_label):
+            with _speaker_task_lock:
+                _speaker_task["diarize_progress"] = {"percent": round(percent, 1)}
+                _speaker_task["detail"] = f"Speaker diarization: {step_label}..."
+
+        # Run diarization
+        with _speaker_task_lock:
+            _speaker_task["stage"] = "diarizing"
+            _speaker_task["detail"] = "Running speaker diarization..."
+
+        turns = diarize_audio(
+            str(filepath),
+            hf_token=config.get("hf_token"),
+            max_speakers=config.get("diarization_max_speakers"),
+            status_callback=_status,
+            progress_callback=_diarize_prog,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        # Extract embeddings
+        with _speaker_task_lock:
+            _speaker_task["stage"] = "extracting"
+            _speaker_task["detail"] = "Extracting speaker embeddings..."
+            _speaker_task["diarize_progress"] = None
+
+        embeddings = extract_speaker_embeddings(
+            str(filepath), turns,
+            hf_token=config.get("hf_token"),
+            status_callback=_status,
+        )
+
+        # Enroll the assigned speakers
+        with _speaker_task_lock:
+            _speaker_task["stage"] = "enrolling"
+
+        enrolled = []
+        for raw_id, name in assignments.items():
+            name = name.strip()
+            if not name:
+                continue
+            if raw_id in embeddings:
+                enroll_speaker(name, embeddings[raw_id]["embedding"], filename)
+                enrolled.append(name)
+                with _speaker_task_lock:
+                    _speaker_task["detail"] = f"Enrolled {name}"
+
+        with _speaker_task_lock:
+            _speaker_task.update({
+                "active": False,
+                "stage": "done",
+                "detail": None,
+                "result": {"enrolled": enrolled},
+            })
+
+    except Exception as e:
+        with _speaker_task_lock:
+            _speaker_task.update({
+                "active": False,
+                "stage": "error",
+                "error": f"{type(e).__name__}: {e}",
+            })
+
+
+@app.route("/api/speakers/<name>", methods=["DELETE"])
+def delete_speaker_endpoint(name):
+    """Delete a speaker profile."""
+    from diarize import delete_profile
+    ok = delete_profile(name)
+    if ok:
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": f"Profile '{name}' not found"}), 404
+
+
+@app.route("/api/speakers/test", methods=["POST"])
+def test_speaker_endpoint():
+    """Test speaker recognition on a file.
+    Body: {"filename": "recording.wav"}
+    """
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename")
+    if not filename:
+        return jsonify({"ok": False, "error": "Missing 'filename'"}), 400
+
+    with _speaker_task_lock:
+        if _speaker_task["active"]:
+            return jsonify({"ok": False, "error": "A speaker task is already running"}), 409
+        _speaker_task.update({
+            "active": True,
+            "stage": "loading",
+            "detail": f"Starting recognition test on {filename}...",
+            "error": None,
+            "result": None,
+        })
+
+    t = threading.Thread(
+        target=_test_recognition_worker, args=(filename,), daemon=True
+    )
+    t.start()
+    return jsonify({"ok": True})
+
+
+def _test_recognition_worker(filename):
+    """Background worker for testing speaker recognition."""
+    try:
+        from diarize import (
+            is_diarization_available,
+            diarize_audio,
+            extract_speaker_embeddings,
+            match_speakers,
+            load_profiles,
+        )
+
+        if not is_diarization_available():
+            with _speaker_task_lock:
+                _speaker_task.update({
+                    "active": False,
+                    "stage": "error",
+                    "error": "pyannote.audio is not installed",
+                })
+            return
+
+        profiles = load_profiles()
+        if not profiles:
+            with _speaker_task_lock:
+                _speaker_task.update({
+                    "active": False,
+                    "stage": "error",
+                    "error": "No speaker profiles enrolled yet",
+                })
+            return
+
+        config = load_config()
+        out_dir = _get_output_dir()
+        filepath = resolve_wav(out_dir, filename)
+
+        if not filepath.exists():
+            with _speaker_task_lock:
+                _speaker_task.update({
+                    "active": False,
+                    "stage": "error",
+                    "error": f"File not found: {filename}",
+                })
+            return
+
+        def _status(msg):
+            with _speaker_task_lock:
+                _speaker_task["detail"] = msg
+
+        def _diarize_prog(percent, step_label):
+            with _speaker_task_lock:
+                _speaker_task["diarize_progress"] = {"percent": round(percent, 1)}
+                _speaker_task["detail"] = f"Speaker diarization: {step_label}..."
+
+        # Run diarization
+        with _speaker_task_lock:
+            _speaker_task["stage"] = "diarizing"
+            _speaker_task["detail"] = "Running speaker diarization..."
+
+        turns = diarize_audio(
+            str(filepath),
+            hf_token=config.get("hf_token"),
+            max_speakers=config.get("diarization_max_speakers"),
+            status_callback=_status,
+            progress_callback=_diarize_prog,
+        )
+
+        # Extract embeddings
+        with _speaker_task_lock:
+            _speaker_task["stage"] = "extracting"
+            _speaker_task["detail"] = "Extracting speaker embeddings..."
+            _speaker_task["diarize_progress"] = None
+
+        embeddings = extract_speaker_embeddings(
+            str(filepath), turns,
+            hf_token=config.get("hf_token"),
+            status_callback=_status,
+        )
+
+        # Match against profiles
+        with _speaker_task_lock:
+            _speaker_task["stage"] = "matching"
+            _speaker_task["detail"] = "Matching speakers against profiles..."
+
+        matches = match_speakers(embeddings)
+
+        # Build result
+        results = {}
+        for spk, spk_data in embeddings.items():
+            match = matches.get(spk)
+            results[spk] = {
+                "duration": spk_data["duration"],
+                "match": match,
+            }
+
+        with _speaker_task_lock:
+            _speaker_task.update({
+                "active": False,
+                "stage": "done",
+                "detail": None,
+                "result": {"speakers": results},
+            })
+
+    except Exception as e:
+        with _speaker_task_lock:
+            _speaker_task.update({
+                "active": False,
+                "stage": "error",
+                "error": f"{type(e).__name__}: {e}",
+            })
+
+
+@app.route("/api/speakers/identify", methods=["POST"])
+def identify_speakers_endpoint():
+    """Identify speakers in a recording (diarize without enrolling).
+    Body: {"filename": "recording.wav", "start_time": 0, "end_time": 120}
+    Returns raw speaker segments and any matches against profiles.
+    """
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename")
+    start_time = data.get("start_time")
+    end_time = data.get("end_time")
+    if not filename:
+        return jsonify({"ok": False, "error": "Missing 'filename'"}), 400
+
+    with _speaker_task_lock:
+        if _speaker_task["active"]:
+            return jsonify({"ok": False, "error": "A speaker task is already running"}), 409
+        _speaker_task.update({
+            "active": True,
+            "stage": "loading",
+            "detail": f"Identifying speakers in {filename}...",
+            "error": None,
+            "result": None,
+        })
+
+    t = threading.Thread(
+        target=_identify_worker, args=(filename, start_time, end_time), daemon=True
+    )
+    t.start()
+    return jsonify({"ok": True})
+
+
+def _identify_worker(filename, start_time=None, end_time=None):
+    """Background worker to identify speakers in a recording."""
+    try:
+        from diarize import (
+            is_diarization_available,
+            diarize_audio,
+            extract_speaker_embeddings,
+            match_speakers,
+            load_profiles,
+        )
+
+        if not is_diarization_available():
+            with _speaker_task_lock:
+                _speaker_task.update({
+                    "active": False,
+                    "stage": "error",
+                    "error": "pyannote.audio is not installed",
+                })
+            return
+
+        config = load_config()
+        out_dir = _get_output_dir()
+        filepath = resolve_wav(out_dir, filename)
+
+        if not filepath.exists():
+            with _speaker_task_lock:
+                _speaker_task.update({
+                    "active": False,
+                    "stage": "error",
+                    "error": f"File not found: {filename}",
+                })
+            return
+
+        def _status(msg):
+            with _speaker_task_lock:
+                _speaker_task["detail"] = msg
+
+        def _diarize_prog(percent, step_label):
+            with _speaker_task_lock:
+                _speaker_task["diarize_progress"] = {"percent": round(percent, 1)}
+                _speaker_task["detail"] = f"Speaker diarization: {step_label}..."
+
+        # Run diarization
+        with _speaker_task_lock:
+            _speaker_task["stage"] = "diarizing"
+            _speaker_task["detail"] = "Running speaker diarization..."
+
+        turns = diarize_audio(
+            str(filepath),
+            hf_token=config.get("hf_token"),
+            max_speakers=config.get("diarization_max_speakers"),
+            status_callback=_status,
+            progress_callback=_diarize_prog,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        # Extract embeddings
+        with _speaker_task_lock:
+            _speaker_task["stage"] = "extracting"
+            _speaker_task["detail"] = "Extracting speaker embeddings..."
+            _speaker_task["diarize_progress"] = None
+
+        embeddings = extract_speaker_embeddings(
+            str(filepath), turns,
+            hf_token=config.get("hf_token"),
+            status_callback=_status,
+        )
+
+        # Match against profiles if any exist
+        profiles = load_profiles()
+        matches = {}
+        if profiles:
+            with _speaker_task_lock:
+                _speaker_task["stage"] = "matching"
+                _speaker_task["detail"] = "Matching speakers against profiles..."
+            matches = match_speakers(embeddings)
+
+        # Build result with speaker info (include turns for audio preview)
+        speakers_info = {}
+        for spk, spk_data in embeddings.items():
+            match = matches.get(spk)
+            spk_turns = [t for t in turns if t["speaker"] == spk]
+            speakers_info[spk] = {
+                "duration": spk_data["duration"],
+                "segments": len(spk_turns),
+                "match": match,
+                "turns": [{"start": t["start"], "end": t["end"]} for t in spk_turns],
+            }
+
+        with _speaker_task_lock:
+            _speaker_task.update({
+                "active": False,
+                "stage": "done",
+                "detail": None,
+                "result": {
+                    "filename": filename,
+                    "speakers": speakers_info,
+                    "total_speakers": len(speakers_info),
+                },
+            })
+
+    except Exception as e:
+        with _speaker_task_lock:
+            _speaker_task.update({
+                "active": False,
+                "stage": "error",
+                "error": f"{type(e).__name__}: {e}",
+            })
+
+
+@app.route("/api/speakers/task/status")
+def speaker_task_status():
+    """Get current speaker task status (similar to transcribe_status)."""
+    with _speaker_task_lock:
+        snapshot = dict(_speaker_task)
+        # Auto-reset terminal states
+        if _speaker_task["stage"] in ("error", "done"):
+            _speaker_task.update({
+                "stage": "idle",
+                "detail": None,
+                "diarize_progress": None,
+                "error": None,
+                "result": None,
+            })
+    return jsonify(snapshot)
+
+
+# ─── Speaker Audio Preview ────────────────────────────────────────────────
+
+@app.route("/api/speakers/preview")
+def speaker_preview():
+    """Serve an audio clip for a speaker given time segments.
+    Query params:
+        filename: recording WAV filename
+        segments: JSON array of {start, end} objects — time ranges to extract
+    Returns a WAV file with the concatenated speaker segments.
+    """
+    import io
+    import wave as wave_mod
+
+    filename = request.args.get("filename")
+    segments_json = request.args.get("segments")
+
+    if not filename or not segments_json:
+        return jsonify({"ok": False, "error": "Missing filename or segments"}), 400
+
+    try:
+        segments = json.loads(segments_json)
+    except (json.JSONDecodeError, TypeError):
+        return jsonify({"ok": False, "error": "Invalid segments JSON"}), 400
+
+    if not segments:
+        return jsonify({"ok": False, "error": "No segments provided"}), 400
+
+    out_dir = _get_output_dir()
+    filepath = resolve_wav(out_dir, filename)
+
+    if not filepath.exists():
+        return jsonify({"ok": False, "error": f"File not found: {filename}"}), 404
+
+    # Prevent path traversal
+    if not filepath.resolve().is_relative_to(out_dir.resolve()):
+        return jsonify({"ok": False, "error": "Invalid filename"}), 400
+
+    # Read the source WAV and extract speaker segments
+    try:
+        with wave_mod.open(str(filepath), "rb") as wf:
+            n_channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            framerate = wf.getframerate()
+            n_frames = wf.getnframes()
+            all_frames = wf.readframes(n_frames)
+
+        # Sort segments by start time, limit to first 30s of audio to keep preview reasonable
+        segs = sorted(segments, key=lambda s: s["start"])
+        extracted = bytearray()
+        total_preview = 0.0
+        max_preview_seconds = 30.0
+        bytes_per_second = framerate * n_channels * sampwidth
+
+        for seg in segs:
+            if total_preview >= max_preview_seconds:
+                break
+            start_byte = int(seg["start"] * bytes_per_second)
+            end_byte = int(seg["end"] * bytes_per_second)
+            # Align to frame boundaries
+            frame_size = n_channels * sampwidth
+            start_byte = (start_byte // frame_size) * frame_size
+            end_byte = (end_byte // frame_size) * frame_size
+            # Clamp
+            start_byte = max(0, min(start_byte, len(all_frames)))
+            end_byte = max(start_byte, min(end_byte, len(all_frames)))
+
+            remaining = max_preview_seconds - total_preview
+            max_bytes = int(remaining * bytes_per_second)
+            max_bytes = (max_bytes // frame_size) * frame_size
+            chunk = all_frames[start_byte:end_byte]
+            if len(chunk) > max_bytes:
+                chunk = chunk[:max_bytes]
+
+            extracted.extend(chunk)
+            total_preview += len(chunk) / bytes_per_second
+
+        # Write to in-memory WAV
+        buf = io.BytesIO()
+        with wave_mod.open(buf, "wb") as out_wf:
+            out_wf.setnchannels(n_channels)
+            out_wf.setsampwidth(sampwidth)
+            out_wf.setframerate(framerate)
+            out_wf.writeframes(bytes(extracted))
+
+        buf.seek(0)
+        return send_file(buf, mimetype="audio/wav", download_name=f"preview_{filename}")
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Failed to extract preview: {e}"}), 500
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

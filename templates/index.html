@@ -194,6 +194,41 @@
   .badge-json { background: #1a3a2a; color: #6cffb0; }
   .recording-item .actions { display: flex; gap: 6px; flex-shrink: 0; }
 
+  /* Timing dropdown */
+  .timing-row { margin-top: 4px; }
+  .timing-text { font-size: 11px; color: #8a8a8a; }
+  .timing-dropdown { display: inline-block; }
+  .timing-summary {
+    font-size: 11px;
+    color: #8a8a8a;
+    cursor: pointer;
+    user-select: none;
+  }
+  .timing-summary:hover { color: #bbb; }
+  .timing-arrow { font-size: 10px; }
+  .timing-details {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.2s ease;
+    margin-top: 0;
+    padding-left: 8px;
+    border-left: 2px solid #333;
+  }
+  .timing-details.open {
+    max-height: 300px;
+    margin-top: 4px;
+  }
+  .timing-step {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: #8a8a8a;
+    padding: 1px 0;
+    max-width: 320px;
+  }
+  .timing-step-name { color: #aaa; }
+  .timing-step-time { color: #6cb8ff; font-weight: 600; margin-left: 16px; }
+
   /* Audio player */
   .audio-player {
     margin-top: 8px;
@@ -285,18 +320,51 @@
   .toggle input:checked + .slider { background: var(--accent); border-color: var(--accent); }
   .toggle input:checked + .slider::before { transform: translateX(20px); background: #fff; }
 
-  /* Error container */
-  #error-container {
+  /* Error/log side panel */
+  #log-panel {
     position: fixed;
-    bottom: 16px;
-    right: 16px;
-    width: 420px;
-    max-height: 50vh;
-    overflow-y: auto;
+    top: 0;
+    right: 0;
+    width: 400px;
+    height: 100vh;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
     z-index: 1000;
     display: flex;
     flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 0.25s ease;
+  }
+  #log-panel.open { transform: translateX(0); }
+  #log-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  #log-panel-header h3 { font-size: 14px; font-weight: 600; margin: 0; }
+  #log-panel-actions { display: flex; gap: 8px; align-items: center; }
+  #log-panel-actions button {
+    background: none; border: none; color: var(--text2); cursor: pointer;
+    font-size: 12px; padding: 4px 8px; border-radius: 4px;
+  }
+  #log-panel-actions button:hover { background: var(--surface2); color: var(--text); }
+  #error-container {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
     gap: 8px;
+  }
+  #error-container:empty::after {
+    content: 'No errors';
+    color: var(--text2);
+    font-size: 13px;
+    text-align: center;
+    margin-top: 24px;
   }
   .error-card {
     background: var(--red-bg);
@@ -305,8 +373,13 @@
     padding: 12px;
     font-size: 13px;
     animation: slideIn 0.2s;
+    flex-shrink: 0;
   }
-  @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } }
+  .error-card.success-card {
+    border-color: var(--green);
+    background: var(--green-bg);
+  }
+  @keyframes slideIn { from { opacity: 0; transform: translateY(-8px); } }
   .error-card .error-header {
     display: flex;
     justify-content: space-between;
@@ -315,6 +388,7 @@
   }
   .error-card .error-time { font-size: 11px; color: var(--text2); }
   .error-card .error-msg { color: var(--red); font-weight: 500; margin-top: 4px; }
+  .error-card.success-card .error-msg { color: var(--green); }
   .error-card .error-dismiss {
     background: none; border: none; color: var(--text2); cursor: pointer;
     font-size: 16px; line-height: 1; padding: 0;
@@ -339,6 +413,33 @@
     background: none; border: none; color: var(--accent); cursor: pointer;
     font-size: 12px; padding: 0; text-decoration: underline;
   }
+
+  /* Log panel toggle button in header */
+  #log-toggle {
+    margin-left: auto;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text2);
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.2s;
+  }
+  #log-toggle:hover { background: var(--surface2); color: var(--text); }
+  #log-toggle .log-count {
+    background: var(--red);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 10px;
+    display: none;
+  }
+  #log-toggle .log-count.has-errors { display: inline; }
 
   /* Device table */
   #device-table {
@@ -396,6 +497,182 @@
   .diarization-status.ok { background: var(--green-bg); color: var(--green); }
   .diarization-status.warn { background: var(--yellow-bg); color: var(--yellow); }
   .diarization-status.err { background: var(--red-bg); color: var(--red); }
+
+  /* Speaker profiles */
+  .profile-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 6px;
+  }
+  .profile-item .profile-name { font-weight: 500; font-size: 14px; }
+  .profile-item .profile-meta { font-size: 11px; color: var(--text2); margin-top: 2px; }
+
+  .speaker-assignment {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 6px;
+  }
+  .speaker-assignment .spk-id { font-weight: 500; font-size: 13px; min-width: 110px; }
+  .speaker-assignment .spk-duration { font-size: 11px; color: var(--text2); min-width: 60px; }
+  .speaker-assignment input { flex: 1; }
+  .speaker-assignment .spk-match {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  .spk-match.high { background: var(--green-bg); color: var(--green); }
+  .spk-match.low { background: var(--yellow-bg); color: var(--yellow); }
+  .spk-match.none { background: var(--surface2); color: var(--text2); }
+
+  .spk-play-btn {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .spk-play-btn.playing {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .speaker-banner {
+    background: var(--yellow-bg);
+    border: 1px solid var(--yellow);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    display: none;
+  }
+  .speaker-banner.active { display: flex; align-items: center; gap: 12px; }
+  .speaker-banner .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid var(--yellow);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  .test-result-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 6px;
+  }
+  .test-result-item .result-spk { font-weight: 500; min-width: 110px; }
+  .test-result-item .result-duration { font-size: 11px; color: var(--text2); min-width: 60px; }
+  .test-result-item .result-match { flex: 1; }
+  .confidence-bar {
+    height: 6px;
+    background: var(--surface);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 4px;
+  }
+  .confidence-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s;
+  }
+  .confidence-bar-fill.high { background: var(--green); }
+  .confidence-bar-fill.low { background: var(--yellow); }
+
+  .profile-count {
+    font-size: 12px;
+    color: var(--text2);
+    margin-bottom: 12px;
+  }
+
+  /* Trim range slider */
+  .trim-range-container {
+    position: relative;
+    height: 40px;
+    margin: 16px 0;
+  }
+  .trim-range-track {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 100%;
+    height: 6px;
+    background: var(--surface2);
+    border-radius: 3px;
+  }
+  .trim-range-selected {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    height: 6px;
+    background: var(--accent);
+    border-radius: 3px;
+    pointer-events: none;
+  }
+  .trim-range-container input[type="range"] {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    pointer-events: none;
+    margin: 0;
+    padding: 0;
+  }
+  .trim-range-container input[type="range"]::-webkit-slider-runnable-track {
+    background: transparent;
+    height: 6px;
+  }
+  .trim-range-container input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    background: var(--accent);
+    border-radius: 50%;
+    cursor: grab;
+    pointer-events: all;
+    border: 2px solid #fff;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    margin-top: -6px;
+  }
+  .trim-range-container input[type="range"]::-moz-range-track {
+    background: transparent;
+    height: 6px;
+    border: none;
+  }
+  .trim-range-container input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    background: var(--accent);
+    border-radius: 50%;
+    cursor: grab;
+    pointer-events: all;
+    border: 2px solid #fff;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  }
 </style>
 </head>
 <body>
@@ -403,11 +680,13 @@
 <header>
   <h1>Audio Capturer</h1>
   <span id="rec-badge" class="rec-badge">REC</span>
+  <button id="log-toggle" onclick="toggleLogPanel()">Logs <span class="log-count" id="log-count">0</span></button>
 </header>
 
 <nav class="tabs">
   <button class="tab-btn active" data-tab="record">Record</button>
   <button class="tab-btn" data-tab="recordings">Recordings</button>
+  <button class="tab-btn" data-tab="speakers">Speakers</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
 </nav>
 
@@ -506,7 +785,46 @@
 <div id="tab-recordings" class="tab-content">
   <div id="transcription-banner" class="transcription-banner">
     <div class="spinner"></div>
-    <span id="transcription-banner-text">Transcribing...</span>
+    <div style="flex:1; min-width:0;">
+      <span id="transcription-banner-text">Transcribing...</span>
+      <div id="transcription-progress" style="display:none; margin-top:8px;">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px; color:var(--text2);">
+          <span id="transcription-pct">0%</span>
+          <span id="transcription-eta"></span>
+        </div>
+        <div style="background:var(--border); border-radius:4px; height:6px; overflow:hidden;">
+          <div id="transcription-bar" style="height:100%; width:0%; background:var(--yellow); border-radius:4px; transition:width 0.5s ease;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
+    <button class="btn btn-sm" onclick="openRecordingsFolder()" title="Open recordings folder in Explorer">📂 Open Folder</button>
+  </div>
+
+  <div id="trim-panel" class="card" style="display:none;">
+    <h3>Transcribe Selection</h3>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+      <span id="trim-filename" style="font-size:14px; font-weight:500;"></span>
+      <span id="trim-duration-info" style="font-size:12px; color:var(--text2);"></span>
+    </div>
+    <div class="trim-range-container">
+      <div class="trim-range-track"></div>
+      <div id="trim-range-selected" class="trim-range-selected"></div>
+      <input type="range" id="trim-start" min="0" max="100" value="0" step="1">
+      <input type="range" id="trim-end" min="0" max="100" value="100" step="1">
+    </div>
+    <div style="display:flex; justify-content:space-between; font-size:13px; color:var(--text2); margin-bottom:16px;">
+      <span>Start: <strong id="trim-start-time" style="color:var(--text);">0:00</strong></span>
+      <span>Selected: <strong id="trim-selected-duration" style="color:var(--accent);">0:00</strong></span>
+      <span>End: <strong id="trim-end-time" style="color:var(--text);">0:00</strong></span>
+    </div>
+    <div style="display:flex; gap:12px;">
+      <button class="btn btn-primary" onclick="startTrimTranscription(false)">Transcribe Selection</button>
+      <button class="btn btn-ghost" onclick="startTrimTranscription(true)">Transcribe All</button>
+      <button class="btn btn-ghost" onclick="closeTrimPanel()">Cancel</button>
+    </div>
   </div>
 
   <div id="recordings-list"></div>
@@ -536,7 +854,27 @@
         <option value="small">small</option>
         <option value="medium">medium</option>
         <option value="large">large</option>
+        <option value="turbo">turbo</option>
       </select>
+    </div>
+    <div class="setting-group">
+      <label for="set-language">Audio Language</label>
+      <select id="set-language">
+        <option value="">Auto-detect</option>
+        <option value="en">English</option>
+        <option value="pt">Portuguese</option>
+        <option value="es">Spanish</option>
+        <option value="fr">French</option>
+        <option value="de">German</option>
+        <option value="it">Italian</option>
+        <option value="ja">Japanese</option>
+        <option value="ko">Korean</option>
+        <option value="zh">Chinese</option>
+        <option value="nl">Dutch</option>
+        <option value="ru">Russian</option>
+        <option value="ar">Arabic</option>
+      </select>
+      <div class="help-text">Set the spoken language to skip auto-detection and improve accuracy. Leave on auto-detect for mixed-language meetings.</div>
     </div>
     <div class="setting-group">
       <div class="toggle-row">
@@ -545,6 +883,19 @@
           <input type="checkbox" id="set-auto-transcribe">
           <span class="slider"></span>
         </label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Vocabulary Hints</h3>
+    <div class="setting-group">
+      <label for="set-vocabulary">Custom terms (comma-separated)</label>
+      <textarea id="set-vocabulary" rows="6" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;width:100%;outline:none;resize:vertical;font-family:inherit;" placeholder="VPN, DNS, Kubernetes, ..."></textarea>
+      <div class="help-text">Jargon, acronyms, and technical terms that Whisper should recognize. These are passed as context hints to improve transcription accuracy for domain-specific vocabulary.</div>
+      <div style="margin-top:8px; display:flex; gap:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="resetVocabularyDefaults()">Reset to Defaults</button>
+        <span id="vocab-count" style="font-size:12px; color:var(--text2); align-self:center;"></span>
       </div>
     </div>
   </div>
@@ -585,7 +936,92 @@
   <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
 </div>
 
-<div id="error-container"></div>
+<!-- ═══ Speakers Tab ═══ -->
+<div id="tab-speakers" class="tab-content">
+  <div id="speaker-banner" class="speaker-banner">
+    <div class="spinner"></div>
+    <div style="flex:1; min-width:0;">
+      <span id="speaker-banner-text">Processing...</span>
+      <div id="speaker-progress" style="display:none; margin-top:8px;">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px; color:var(--text2);">
+          <span id="speaker-pct">0%</span>
+          <span id="speaker-step"></span>
+        </div>
+        <div style="background:var(--border); border-radius:4px; height:6px; overflow:hidden;">
+          <div id="speaker-bar" style="height:100%; width:0%; background:var(--yellow); border-radius:4px; transition:width 0.5s ease;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Enrolled Profiles -->
+  <div class="card">
+    <h3>Enrolled Profiles</h3>
+    <div id="profiles-count" class="profile-count"></div>
+    <div id="profiles-list"></div>
+  </div>
+
+  <!-- Enroll New Speakers -->
+  <div class="card">
+    <h3>Enroll New Speakers</h3>
+    <div class="setting-group">
+      <label for="enroll-file">Select a recording to analyze</label>
+      <select id="enroll-file"><option value="">Select recording...</option></select>
+    </div>
+    <div id="enroll-trim-panel" style="display:none; margin-bottom:12px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+        <span style="font-size:13px; color:var(--text2);">Select time range to analyze</span>
+        <span id="enroll-trim-duration-info" style="font-size:12px; color:var(--text2);"></span>
+      </div>
+      <div class="trim-range-container">
+        <div class="trim-range-track"></div>
+        <div id="enroll-trim-range-selected" class="trim-range-selected"></div>
+        <input type="range" id="enroll-trim-start" min="0" max="100" value="0" step="1">
+        <input type="range" id="enroll-trim-end" min="0" max="100" value="100" step="1">
+      </div>
+      <div style="display:flex; justify-content:space-between; font-size:13px; color:var(--text2);">
+        <span>Start: <strong id="enroll-trim-start-time" style="color:var(--text);">0:00</strong></span>
+        <span>Selected: <strong id="enroll-trim-selected-duration" style="color:var(--accent);">0:00</strong></span>
+        <span>End: <strong id="enroll-trim-end-time" style="color:var(--text);">0:00</strong></span>
+      </div>
+    </div>
+    <div style="display:flex; gap:12px; margin-bottom:12px;">
+      <button class="btn btn-ghost" id="btn-analyze-speakers" onclick="analyzeSpeakers(false)">Analyze Selection</button>
+      <button class="btn btn-ghost" id="btn-analyze-all" onclick="analyzeSpeakers(true)">Analyze All</button>
+    </div>
+    <div id="enroll-speakers" style="display:none;">
+      <div style="font-size:13px; color:var(--text2); margin-bottom:8px;">
+        Enter a name for each speaker you want to enroll. Leave blank to skip.
+      </div>
+      <div id="enroll-speaker-list"></div>
+      <button class="btn btn-primary" onclick="enrollSelectedSpeakers()" style="margin-top:12px;">Enroll Selected</button>
+    </div>
+  </div>
+
+  <!-- Test Recognition -->
+  <div class="card">
+    <h3>Test Recognition</h3>
+    <div class="setting-group">
+      <label for="test-file">Select a recording to test</label>
+      <select id="test-file"><option value="">Select recording...</option></select>
+    </div>
+    <button class="btn btn-ghost" id="btn-test-recognition" onclick="testRecognition()">Test Recognition</button>
+    <div id="test-results" style="display:none; margin-top:12px;">
+      <div id="test-results-list"></div>
+    </div>
+  </div>
+</div>
+
+<div id="log-panel">
+  <div id="log-panel-header">
+    <h3>Errors &amp; Logs</h3>
+    <div id="log-panel-actions">
+      <button onclick="clearAllErrors()">Clear all</button>
+      <button onclick="toggleLogPanel()" style="font-size:16px">&times;</button>
+    </div>
+  </div>
+  <div id="error-container"></div>
+</div>
 
 <script>
 // ─── API wrapper ──────────────────────────────────────────────────────────
@@ -607,6 +1043,23 @@ async function apiCall(url, opts = {}) {
   }
 }
 
+// ─── Log panel ───────────────────────────────────────────────────────────
+function toggleLogPanel() {
+  document.getElementById('log-panel').classList.toggle('open');
+}
+
+function updateLogCount() {
+  const count = document.getElementById('error-container').querySelectorAll('.error-card:not(.success-card)').length;
+  const badge = document.getElementById('log-count');
+  badge.textContent = count;
+  badge.classList.toggle('has-errors', count > 0);
+}
+
+function clearAllErrors() {
+  document.getElementById('error-container').innerHTML = '';
+  updateLogCount();
+}
+
 // ─── Error display ────────────────────────────────────────────────────────
 function showError(msg, tb) {
   const container = document.getElementById('error-container');
@@ -616,7 +1069,7 @@ function showError(msg, tb) {
   card.innerHTML = `
     <div class="error-header">
       <span class="error-time">${now}</span>
-      <button class="error-dismiss" onclick="this.closest('.error-card').remove()">&times;</button>
+      <button class="error-dismiss" onclick="dismissError(this)">&times;</button>
     </div>
     <div class="error-msg">${escapeHtml(msg)}</div>
     ${tb ? `
@@ -627,8 +1080,15 @@ function showError(msg, tb) {
       <div class="error-tb">${escapeHtml(tb)}</div>
     ` : ''}
   `;
-  container.appendChild(card);
-  setTimeout(() => { if (card.parentElement) card.remove(); }, 30000);
+  container.prepend(card);
+  updateLogCount();
+  // Auto-open panel on new error
+  document.getElementById('log-panel').classList.add('open');
+}
+
+function dismissError(btn) {
+  btn.closest('.error-card').remove();
+  updateLogCount();
 }
 
 function copyTb(btn) {
@@ -652,6 +1112,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'recordings') loadRecordings();
+    if (btn.dataset.tab === 'speakers') loadSpeakersTab();
     if (btn.dataset.tab === 'settings') loadSettings();
   });
 });
@@ -743,11 +1204,13 @@ async function loadRecordings() {
     ).join('');
     const hasTranscript = Object.keys(r.transcripts).length > 0;
     const safeName = escapeAttr(r.name);
+    const timingHtml = r.timing ? formatTiming(r.timing, safeName) : '';
     return `
       <div class="recording-item" style="flex-wrap:wrap;">
         <div class="info">
           <div class="name">${escapeHtml(r.name)}</div>
           <div class="meta">${r.size_mb} MB &middot; ${date}</div>
+          ${timingHtml ? `<div class="timing-row">${timingHtml}</div>` : ''}
           <div class="badges">${badges}</div>
         </div>
         <div class="actions">
@@ -776,15 +1239,134 @@ function escapeAttr(s) {
   return s.replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
+function formatDuration(sec) {
+  if (sec == null) return '';
+  const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+  return m > 0 ? `${m}m ${String(s).padStart(2,'0')}s` : `${s}s`;
+}
+
+function formatTiming(t, safeName) {
+  if (!t || !t.total_seconds) return '';
+  const model = t.model ? ` [${t.model}]` : '';
+  const summary = `Processed in ${formatDuration(t.total_seconds)}${model}`;
+
+  if (!t.steps || !t.steps.length) {
+    // Legacy format — no steps, just show summary
+    return `<span class="timing-text">${summary}</span>`;
+  }
+
+  const stepsHtml = t.steps.map(s =>
+    `<div class="timing-step"><span class="timing-step-name">${s.name}</span><span class="timing-step-time">${formatDuration(s.seconds)}</span></div>`
+  ).join('');
+
+  return `<div class="timing-dropdown">` +
+    `<span class="timing-summary" onclick="toggleTiming(this, event)">${summary} <span class="timing-arrow">&#9656;</span></span>` +
+    `<div class="timing-details">${stepsHtml}</div>` +
+    `</div>`;
+}
+
+function toggleTiming(el, e) {
+  e.stopPropagation();
+  const details = el.nextElementSibling;
+  const arrow = el.querySelector('.timing-arrow');
+  if (details.classList.contains('open')) {
+    details.classList.remove('open');
+    arrow.textContent = '\u25B8'; // ▸
+  } else {
+    details.classList.add('open');
+    arrow.textContent = '\u25BE'; // ▾
+  }
+}
+
+let trimState = { filename: null, duration: 0 };
+
 async function transcribeFile(name) {
+  // Fetch duration and show trim panel
+  const data = await apiCall(`/api/recordings/${encodeURIComponent(name)}/duration`);
+  if (!data) return;
+
+  trimState.filename = name;
+  trimState.duration = data.duration;
+
+  document.getElementById('trim-filename').textContent = name;
+  document.getElementById('trim-duration-info').textContent = `Total: ${formatTimeDuration(data.duration)}`;
+
+  const startInput = document.getElementById('trim-start');
+  const endInput = document.getElementById('trim-end');
+  startInput.max = data.duration;
+  endInput.max = data.duration;
+  startInput.value = 0;
+  endInput.value = data.duration;
+  startInput.step = 1;
+  endInput.step = 1;
+
+  updateTrimDisplay();
+  document.getElementById('trim-panel').style.display = 'block';
+  document.getElementById('trim-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function updateTrimDisplay() {
+  const start = parseFloat(document.getElementById('trim-start').value);
+  const end = parseFloat(document.getElementById('trim-end').value);
+
+  document.getElementById('trim-start-time').textContent = formatTimeDuration(start);
+  document.getElementById('trim-end-time').textContent = formatTimeDuration(end);
+  document.getElementById('trim-selected-duration').textContent = formatTimeDuration(Math.max(0, end - start));
+
+  const dur = trimState.duration || 1;
+  const pctStart = (start / dur) * 100;
+  const pctEnd = (end / dur) * 100;
+  const selected = document.getElementById('trim-range-selected');
+  selected.style.left = pctStart + '%';
+  selected.style.width = (pctEnd - pctStart) + '%';
+}
+
+function formatTimeDuration(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+async function startTrimTranscription(full) {
+  const body = { filename: trimState.filename };
+  if (!full) {
+    const start = parseFloat(document.getElementById('trim-start').value);
+    const end = parseFloat(document.getElementById('trim-end').value);
+    if (start > 0) body.start_time = start;
+    if (end < trimState.duration) body.end_time = end;
+  }
+
   const data = await apiCall('/api/transcribe', {
     method: 'POST',
-    body: JSON.stringify({ filename: name }),
+    body: JSON.stringify(body),
   });
   if (data) {
+    closeTrimPanel();
     startTranscriptionPoll();
   }
 }
+
+function closeTrimPanel() {
+  document.getElementById('trim-panel').style.display = 'none';
+}
+
+document.getElementById('trim-start').addEventListener('input', function() {
+  const endVal = parseFloat(document.getElementById('trim-end').value);
+  if (parseFloat(this.value) >= endVal) {
+    this.value = endVal - parseFloat(this.step);
+  }
+  updateTrimDisplay();
+});
+
+document.getElementById('trim-end').addEventListener('input', function() {
+  const startVal = parseFloat(document.getElementById('trim-start').value);
+  if (parseFloat(this.value) <= startVal) {
+    this.value = startVal + parseFloat(this.step);
+  }
+  updateTrimDisplay();
+});
 
 function startTranscriptionPoll() {
   stopTranscriptionPoll();
@@ -805,16 +1387,78 @@ async function checkTranscriptionStatus() {
   if (data.active) {
     banner.classList.add('active');
     const model = data.model ? ` [${data.model}]` : '';
+    const diarizeDetail = data.diarize_detail || '';
+    const diarizeOn = data.diarization_enabled;
+    const diarizeTag = diarizeOn ? ' · Diarization ON' : '';
     const stages = {
       loading_model: `Loading Whisper model${model}...`,
-      transcribing: `Transcribing with model${model}...`,
-      diarizing: 'Identifying speakers...',
+      loading_diarize_model: 'Loading diarization model...',
+      transcribing: `Transcribing audio with Whisper${model}...`,
+      processing: `Transcription + Diarization running in parallel${model}...`,
+      diarizing: diarizeDetail || 'Running speaker diarization...',
+      diarize_merging: 'Merging speaker labels with transcription...',
       saving: 'Saving transcripts...',
     };
-    text.textContent = `${stages[data.stage] || data.stage} (${data.filename})`;
+    text.textContent = `${stages[data.stage] || data.stage} — ${data.filename}${diarizeTag}`;
+
+    // Progress bar for transcribing/processing stages
+    const progressWrap = document.getElementById('transcription-progress');
+    const pctEl = document.getElementById('transcription-pct');
+    const etaEl = document.getElementById('transcription-eta');
+    const barEl = document.getElementById('transcription-bar');
+    const p = data.progress;
+    const mlp = data.model_load_progress;
+    const dp = data.diarize_progress;
+    if (data.stage === 'loading_model' && mlp && typeof mlp.percent === 'number') {
+      progressWrap.style.display = 'block';
+      barEl.style.width = mlp.percent + '%';
+      pctEl.textContent = mlp.percent.toFixed(1) + '%';
+      etaEl.textContent = 'Loading model weights...';
+    } else if (data.stage === 'loading_diarize_model') {
+      progressWrap.style.display = 'block';
+      barEl.style.width = '100%';
+      pctEl.textContent = '';
+      etaEl.textContent = data.diarize_detail || 'Loading diarization model...';
+    } else if ((data.stage === 'transcribing' || data.stage === 'processing') && p && typeof p.percent === 'number') {
+      progressWrap.style.display = 'block';
+      barEl.style.width = p.percent + '%';
+      pctEl.textContent = p.percent.toFixed(1) + '%';
+      // Compute elapsed client-side from started_at so it ticks even when Whisper is silent
+      let elapsed = p.elapsed || 0;
+      if (data.started_at) {
+        elapsed = Math.round(Date.now() / 1000 - data.started_at);
+      }
+      const elM = Math.floor(elapsed / 60), elS = elapsed % 60;
+      let etaText = `Whisper: ${elM}:${String(elS).padStart(2,'0')} elapsed`;
+      // Compute ETA from live elapsed + last known percent
+      if (p.percent > 0.1) {
+        const eta = Math.round((elapsed / p.percent * 100) - elapsed);
+        const etaM = Math.floor(eta / 60), etaS = eta % 60;
+        etaText += ` · ETA: ${etaM}:${String(etaS).padStart(2,'0')}`;
+      }
+      // Staleness indicator: if server-side progress hasn't updated in 30s+
+      if (data.started_at && elapsed - (p.elapsed || 0) > 30) {
+        etaText += ' (still working\u2026)';
+      }
+      if (data.stage === 'processing' && data.diarize_detail) {
+        etaText += ` · ${data.diarize_detail}`;
+      }
+      etaEl.textContent = etaText;
+    } else if (data.stage === 'diarizing' && dp && typeof dp.percent === 'number') {
+      progressWrap.style.display = 'block';
+      barEl.style.width = dp.percent + '%';
+      pctEl.textContent = dp.percent.toFixed(1) + '%';
+      etaEl.textContent = data.diarize_detail || 'Running speaker diarization...';
+    } else {
+      progressWrap.style.display = 'none';
+      barEl.style.width = '0%';
+    }
+
     if (!transcriptionPoll) startTranscriptionPoll();
   } else {
     banner.classList.remove('active');
+    document.getElementById('transcription-progress').style.display = 'none';
+    document.getElementById('transcription-bar').style.width = '0%';
     if (data.stage === 'done') {
       stopTranscriptionPoll();
       loadRecordings();
@@ -829,13 +1473,37 @@ async function checkTranscriptionStatus() {
 }
 
 function colorizeSpeakers(text) {
-  // Color-code speaker labels like "Person 1:", "[Person 1]"
-  return text.replace(/((?:Person \d+|Unknown))(?=[\]:])/g, (match) => {
-    const num = match.match(/\d+/);
-    const idx = num ? parseInt(num[0]) : 0;
-    const cls = idx >= 1 && idx <= 8 ? `speaker-${idx}` : '';
-    return `<span class="speaker-label ${cls}">${escapeHtml(match)}</span>`;
+  // Color-code speaker labels like "Person 1:", "[Person 1]", or real names from profiles
+  // Track unique speakers in order of appearance to assign consistent colors
+  const speakerColors = {};
+  let colorIdx = 0;
+
+  function getSpeakerClass(name) {
+    if (!(name in speakerColors)) {
+      colorIdx++;
+      speakerColors[name] = colorIdx <= 8 ? `speaker-${colorIdx}` : '';
+    }
+    return speakerColors[name];
+  }
+
+  // Match "Person N", "Unknown", or any word(s) before ]: or : at line start
+  // Pattern 1: [SpeakerName] in SRT format
+  let result = text.replace(/\[([^\]]+)\](?= )/g, (full, name) => {
+    const cls = getSpeakerClass(name);
+    return `[<span class="speaker-label ${cls}">${escapeHtml(name)}</span>]`;
   });
+
+  // Pattern 2: "SpeakerName: text" in plain text format (at start of line or after newline)
+  result = result.replace(/(^|\n)([A-Za-z][A-Za-z0-9 ]+?)(?=: )/gm, (full, pre, name) => {
+    const trimmed = name.trim();
+    if (trimmed) {
+      const cls = getSpeakerClass(trimmed);
+      return `${pre}<span class="speaker-label ${cls}">${escapeHtml(trimmed)}</span>`;
+    }
+    return full;
+  });
+
+  return result;
 }
 
 function renderTranscript(content, format) {
@@ -930,6 +1598,10 @@ function downloadFile(name, format) {
   window.open(`/api/recordings/${encodeURIComponent(name)}/download?format=${format}`, '_blank');
 }
 
+async function openRecordingsFolder() {
+  await apiCall('/api/recordings/open-folder', { method: 'POST' });
+}
+
 async function deleteRecording(name) {
   if (!confirm(`Delete ${name} and all associated files?`)) return;
   const data = await apiCall(`/api/recordings/${encodeURIComponent(name)}`, { method: 'DELETE' });
@@ -949,6 +1621,20 @@ async function renameRecording(name) {
   }
 }
 
+// ─── Vocabulary defaults ──────────────────────────────────────────────────
+const DEFAULT_VOCABULARY = "Kubernetes, K8s, Docker, Terraform, Ansible, Jenkins, GitLab, GitHub, Grafana, Prometheus, Datadog, Splunk, Nagios, Zabbix, PagerDuty, OpsGenie, New Relic, Dynatrace, AppDynamics, ELK Stack, Elasticsearch, Logstash, Kibana, Fluentd, Helm, Istio, Envoy, Consul, Vault, HashiCorp, ArgoCD, Flux, Tekton, Spinnaker, CircleCI, SonarQube, Artifactory, Nexus, Harbor, Trivy, OPA, Open Policy Agent, Kustomize, Podman, Rancher, OpenShift, kubectl, kubeadm, kubelet, etcd, CoreDNS, Calico, Cilium, NGINX, HAProxy, Traefik, Vagrant, Packer, Pulumi, CloudFormation, AWS CDK, Bicep, Crossplane, Backstage, CI/CD, continuous integration, continuous delivery, continuous deployment, pipeline, artifact, container registry, microservices, service mesh, sidecar, canary deployment, blue-green deployment, rolling update, rollback, A/B testing, feature flag, LaunchDarkly, infrastructure as code, IaC, GitOps, DevSecOps, shift left, observability, telemetry, tracing, distributed tracing, OpenTelemetry, OTEL, Jaeger, Zipkin, APM, application performance monitoring, SRE, site reliability engineering, error budget, golden signals, latency, saturation, SLA, SLO, SLI, service level agreement, service level objective, service level indicator, MTTR, MTTA, MTBF, mean time to recovery, mean time to acknowledge, mean time between failures, RTO, RPO, recovery time objective, recovery point objective, incident management, postmortem, blameless postmortem, runbook, playbook, on-call, escalation, war room, ServiceNow, ITOM, ITSM, ITIL, CMDB, Configuration Management Database, configuration item, CI class, discovery, Discovery, horizontal discovery, top-down discovery, pattern-based discovery, agentless discovery, MID Server, Management Instrumentation and Discovery, ACC, Agent Client Collector, Service Mapping, service mapping, application service, business service, service dependency, dependency map, Event Management, event management, event rule, event correlation, alert management, alert aggregation, root cause analysis, RCA, probable cause, Health Log Analytics, HLA, log analytics, anomaly detection, metric anomaly, ITOM Visibility, ITOM Health, ITOM Optimization, Cloud Management, cloud provisioning, cloud governance, Cloud Insights, tag governance, Predictive AIOps, AIOps, AI Operations, Flow Designer, IntegrationHub, integration hub, spoke, subflow, workflow, orchestration, Orchestration, runbook automation, credential alias, discovery schedule, IP range, classification, identification, reconciliation, IRE, Identification and Reconciliation Engine, CSDM, Common Service Data Model, domain separation, scoped application, update set, system property, script include, business rule, scheduled job, transform map, import set, REST API, Table API, CMDB API, GlideRecord, GlideSystem, client script, UI policy, UI action, catalog item, record producer, service catalog, service portal, Now Platform, SACM, change management, change request, change advisory board, CAB, problem management, known error, KEDB, SLA definition, asset management, software asset management, SAM, hardware asset management, HAM, AWS, Amazon Web Services, Azure, Microsoft Azure, GCP, Google Cloud Platform, EC2, S3, Lambda, EKS, ECS, Fargate, RDS, DynamoDB, CloudWatch, CloudTrail, IAM, VPC, Route 53, API Gateway, SNS, SQS, Kinesis, Redshift, Aurora, ElastiCache, CodePipeline, CodeBuild, CodeDeploy, AKS, Azure DevOps, Azure Monitor, Azure Functions, Cosmos DB, Entra ID, App Service, Blob Storage, GKE, Cloud Run, Cloud Functions, BigQuery, Pub/Sub, Cloud Spanner, Anthos, VPN, virtual private network, DNS, domain name system, SSH, secure shell, SSL, TLS, HTTP, HTTPS, TCP, UDP, SNMP, simple network management protocol, REST, RESTful, gRPC, GraphQL, WebSocket, SOAP, WMI, Windows Management Instrumentation, PowerShell, Bash, API key, OAuth, SAML, SSO, single sign-on, LDAP, Active Directory, Kerberos, MFA, multi-factor authentication, RBAC, role-based access control, ACL, access control list, firewall, WAF, web application firewall, load balancer, reverse proxy, CDN, content delivery network, subnet, CIDR, VLAN, NAT, network address translation, BGP, SDN, software-defined networking, bandwidth, throughput, jitter, packet loss, traceroute, IPAM, DHCP, DMZ, demilitarized zone, zero trust, mTLS, mutual TLS, PKI, public key infrastructure, secrets management, VM, virtual machine, hypervisor, VMware, vSphere, vCenter, ESXi, Hyper-V, KVM, bare metal, data center, hybrid cloud, multi-cloud, on-premises, on-prem, edge computing, serverless, FaaS, PaaS, IaaS, SaaS, containerization, pod, node, cluster, namespace, deployment, replica set, daemon set, stateful set, config map, persistent volume, horizontal pod autoscaler, HPA, liveness probe, readiness probe, network policy, YAML, JSON, Dockerfile, docker-compose, Jenkinsfile, Python, Go, Golang, Node.js, Java, Git, merge, rebase, cherry-pick, semantic versioning, semver, monorepo, trunk-based development, pull request, PR, merge request, MR, code review, linting, static analysis, SAST, DAST, dependency scanning, vulnerability scanning, CVE, patch management, hotfix, zero-day, compliance, SOC 2, ISO 27001, GDPR, chaos engineering, load testing, JMeter, Gatling, k6, synthetic monitoring, real user monitoring, RUM, uptime, downtime, high availability, HA, disaster recovery, DR, failover, clustering, replication, sharding, caching, Redis, Memcached, RabbitMQ, Kafka, Apache Kafka, NATS, pub/sub, event-driven, webhook, idempotent, eventual consistency, PostgreSQL, MySQL, MongoDB, Cassandra, InfluxDB, schema migration, ORM, ETL, data pipeline, data lake, Snowflake, Databricks, Airflow, Apache Airflow, DAG, cron, systemd, daemon, CPU, RAM, IOPS, NFS, SAN, NAS, RAID, LVM, Linux, Ubuntu, CentOS, RHEL, Red Hat, Debian, Alpine, Windows Server, IIS, Apache, Tomcat, JVM, Chef, Puppet, Salt, SaltStack, Terraform Cloud, state file, tfstate, staging, production, sandbox, QA, UAT, smoke test, regression test, unit test, integration test, end-to-end, E2E, Selenium, Cypress, Playwright, BDD, TDD, Scrum, Kanban, agile, sprint, backlog, epic, Jira, Confluence, Slack, Teams, Microsoft Teams, Zoom, chatops, API gateway, service discovery, health check, heartbeat, timeout, retry, circuit breaker, rate limiting, throttling, graceful degradation, fault tolerance, resilience, auto-scaling, spot instance, FinOps, SNMP trap, syslog, log aggregation, centralized logging, structured logging, stack trace, memory leak, CPU spike, out of memory, OOM, deadlock, race condition, bottleneck, capacity planning, P50, P90, P95, P99, dashboard, alert rule, on-call rotation, escalation policy, maintenance window, change freeze, deployment window, release management, container registry, image tag, SHA, checksum, SBOM, software bill of materials, admission controller, CRD, custom resource definition, operator, reconciliation loop, drift detection, policy enforcement, guardrail, landing zone, multi-tenancy, blast radius, least privilege, just-in-time access, PAM, privileged access management, audit trail, immutable infrastructure, golden image, AMI, snapshot, backup, NTT DATA, NTT, CMDB health, stale CI, orphan CI, ServiceNow ITSM, ServiceNow ITOM, ServiceNow ITAM, ServiceNow SecOps, GlideAjax, ACL rule, sys_id, PDI, personal developer instance, ATF, automated test framework";
+
+function resetVocabularyDefaults() {
+  document.getElementById('set-vocabulary').value = DEFAULT_VOCABULARY;
+  updateVocabCount();
+}
+
+function updateVocabCount() {
+  const vocab = document.getElementById('set-vocabulary').value.trim();
+  const count = vocab ? vocab.split(',').filter(t => t.trim()).length : 0;
+  document.getElementById('vocab-count').textContent = count > 0 ? `${count} terms` : '';
+}
+
 // ─── Settings ─────────────────────────────────────────────────────────────
 async function loadSettings() {
   const data = await apiCall('/api/settings');
@@ -956,7 +1642,17 @@ async function loadSettings() {
   const s = data.settings;
   document.getElementById('set-output-dir').value = s.output_dir || '';
   document.getElementById('set-model').value = s.whisper_model || 'base';
+  document.getElementById('set-language').value = s.language || '';
   document.getElementById('set-auto-transcribe').checked = !!s.auto_transcribe;
+
+  // Vocabulary terms
+  const vocabEl = document.getElementById('set-vocabulary');
+  if (s.vocabulary_terms) {
+    vocabEl.value = s.vocabulary_terms;
+  } else if (!vocabEl.value) {
+    vocabEl.value = DEFAULT_VOCABULARY;
+  }
+  updateVocabCount();
 
   // Diarization settings
   document.getElementById('set-diarization').checked = !!s.diarization_enabled;
@@ -1003,11 +1699,13 @@ async function saveSettings() {
   const body = {
     output_dir: document.getElementById('set-output-dir').value,
     whisper_model: document.getElementById('set-model').value,
+    language: document.getElementById('set-language').value || null,
     auto_transcribe: document.getElementById('set-auto-transcribe').checked,
     device_index: devVal ? parseInt(devVal) : null,
     diarization_enabled: document.getElementById('set-diarization').checked,
     hf_token: document.getElementById('set-hf-token').value || null,
     diarization_max_speakers: maxSpeakers ? parseInt(maxSpeakers) : null,
+    vocabulary_terms: document.getElementById('set-vocabulary').value.trim() || null,
   };
   const data = await apiCall('/api/settings', {
     method: 'PUT',
@@ -1023,18 +1721,16 @@ async function saveSettings() {
 function showSuccess(msg) {
   const container = document.getElementById('error-container');
   const card = document.createElement('div');
-  card.className = 'error-card';
-  card.style.borderColor = 'var(--green)';
-  card.style.background = 'var(--green-bg)';
+  card.className = 'error-card success-card';
   card.innerHTML = `
     <div class="error-header">
       <span class="error-time">${new Date().toLocaleTimeString()}</span>
       <button class="error-dismiss" onclick="this.closest('.error-card').remove()">&times;</button>
     </div>
-    <div class="error-msg" style="color:var(--green)">${escapeHtml(msg)}</div>
+    <div class="error-msg">${escapeHtml(msg)}</div>
   `;
-  container.appendChild(card);
-  setTimeout(() => { if (card.parentElement) card.remove(); }, 5000);
+  container.prepend(card);
+  setTimeout(() => { if (card.parentElement) card.remove(); }, 8000);
 }
 
 // ─── Device list ──────────────────────────────────────────────────────────
@@ -1192,6 +1888,458 @@ async function loadDevices() {
     opt.textContent = `[${d.index}] ${d.name} (${d.sample_rate}Hz)`;
     recSel.appendChild(opt);
   });
+}
+
+// ─── Vocabulary term counter ──────────────────────────────────────────────
+document.getElementById('set-vocabulary').addEventListener('input', updateVocabCount);
+
+// ─── Speaker Profiles ─────────────────────────────────────────────────────
+let speakerTaskPoll = null;
+let identifyResult = null;
+
+async function loadSpeakersTab() {
+  await loadProfiles();
+  await loadRecordingSelectors();
+  checkSpeakerTaskStatus();
+}
+
+async function loadProfiles() {
+  const data = await apiCall('/api/speakers');
+  if (!data) return;
+
+  const countEl = document.getElementById('profiles-count');
+  const listEl = document.getElementById('profiles-list');
+
+  if (data.count === 0) {
+    countEl.textContent = 'No speaker profiles enrolled yet.';
+    listEl.innerHTML = '';
+    return;
+  }
+
+  countEl.textContent = `${data.count} profile(s) enrolled`;
+  const names = Object.keys(data.profiles).sort();
+  listEl.innerHTML = names.map(name => {
+    const p = data.profiles[name];
+    const date = p.enrolled_date ? new Date(p.enrolled_date).toLocaleString() : 'unknown';
+    const source = p.enrolled_from || 'unknown';
+    return `
+      <div class="profile-item">
+        <div>
+          <div class="profile-name">${escapeHtml(name)}</div>
+          <div class="profile-meta">Enrolled: ${escapeHtml(date)} &middot; Source: ${escapeHtml(source)}</div>
+        </div>
+        <button class="btn btn-danger btn-sm" onclick="deleteSpeakerProfile('${escapeAttr(name)}')">Delete</button>
+      </div>
+    `;
+  }).join('');
+}
+
+async function loadRecordingSelectors() {
+  const data = await apiCall('/api/recordings');
+  if (!data) return;
+
+  const enrollSel = document.getElementById('enroll-file');
+  const testSel = document.getElementById('test-file');
+
+  enrollSel.innerHTML = '<option value="">Select recording...</option>';
+  testSel.innerHTML = '<option value="">Select recording...</option>';
+
+  data.recordings.forEach(r => {
+    const opt1 = document.createElement('option');
+    opt1.value = r.name;
+    opt1.textContent = r.name;
+    enrollSel.appendChild(opt1);
+
+    const opt2 = document.createElement('option');
+    opt2.value = r.name;
+    opt2.textContent = r.name;
+    testSel.appendChild(opt2);
+  });
+}
+
+async function deleteSpeakerProfile(name) {
+  if (!confirm(`Delete speaker profile "${name}"?`)) return;
+  const data = await apiCall(`/api/speakers/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (data) {
+    showSuccess(`Profile "${name}" deleted`);
+    loadProfiles();
+  }
+}
+
+// ─── Enrollment trim range ──────────────────────────────────────────────
+let enrollTrimState = { filename: null, duration: 0 };
+
+document.getElementById('enroll-file').addEventListener('change', async function() {
+  const panel = document.getElementById('enroll-trim-panel');
+  const filename = this.value;
+  document.getElementById('enroll-speakers').style.display = 'none';
+  identifyResult = null;
+
+  if (!filename) {
+    panel.style.display = 'none';
+    enrollTrimState = { filename: null, duration: 0 };
+    return;
+  }
+
+  const data = await apiCall(`/api/recordings/${encodeURIComponent(filename)}/duration`);
+  if (!data) { panel.style.display = 'none'; return; }
+
+  enrollTrimState.filename = filename;
+  enrollTrimState.duration = data.duration;
+
+  document.getElementById('enroll-trim-duration-info').textContent = `Total: ${formatTimeDuration(data.duration)}`;
+
+  const startInput = document.getElementById('enroll-trim-start');
+  const endInput = document.getElementById('enroll-trim-end');
+  startInput.max = data.duration;
+  endInput.max = data.duration;
+  startInput.value = 0;
+  endInput.value = data.duration;
+  startInput.step = 1;
+  endInput.step = 1;
+
+  updateEnrollTrimDisplay();
+  panel.style.display = 'block';
+});
+
+function updateEnrollTrimDisplay() {
+  const start = parseFloat(document.getElementById('enroll-trim-start').value);
+  const end = parseFloat(document.getElementById('enroll-trim-end').value);
+
+  document.getElementById('enroll-trim-start-time').textContent = formatTimeDuration(start);
+  document.getElementById('enroll-trim-end-time').textContent = formatTimeDuration(end);
+  document.getElementById('enroll-trim-selected-duration').textContent = formatTimeDuration(Math.max(0, end - start));
+
+  const dur = enrollTrimState.duration || 1;
+  const pctStart = (start / dur) * 100;
+  const pctEnd = (end / dur) * 100;
+  const selected = document.getElementById('enroll-trim-range-selected');
+  selected.style.left = pctStart + '%';
+  selected.style.width = (pctEnd - pctStart) + '%';
+}
+
+document.getElementById('enroll-trim-start').addEventListener('input', function() {
+  const endVal = parseFloat(document.getElementById('enroll-trim-end').value);
+  if (parseFloat(this.value) >= endVal) {
+    this.value = endVal - parseFloat(this.step);
+  }
+  updateEnrollTrimDisplay();
+});
+
+document.getElementById('enroll-trim-end').addEventListener('input', function() {
+  const startVal = parseFloat(document.getElementById('enroll-trim-start').value);
+  if (parseFloat(this.value) <= startVal) {
+    this.value = startVal + parseFloat(this.step);
+  }
+  updateEnrollTrimDisplay();
+});
+
+function getEnrollTimeRange(full) {
+  if (full) return {};
+  const start = parseFloat(document.getElementById('enroll-trim-start').value);
+  const end = parseFloat(document.getElementById('enroll-trim-end').value);
+  const range = {};
+  if (start > 0) range.start_time = start;
+  if (end < enrollTrimState.duration) range.end_time = end;
+  return range;
+}
+
+async function analyzeSpeakers(full) {
+  const filename = document.getElementById('enroll-file').value;
+  if (!filename) {
+    showError('Please select a recording first');
+    return;
+  }
+
+  document.getElementById('btn-analyze-speakers').disabled = true;
+  document.getElementById('btn-analyze-all').disabled = true;
+  document.getElementById('enroll-speakers').style.display = 'none';
+  stopSpeakerPreview();
+  identifyResult = null;
+
+  const body = { filename, ...getEnrollTimeRange(full) };
+  const data = await apiCall('/api/speakers/identify', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+
+  if (data) {
+    startSpeakerTaskPoll('enroll');
+  } else {
+    document.getElementById('btn-analyze-speakers').disabled = false;
+    document.getElementById('btn-analyze-all').disabled = false;
+  }
+}
+
+async function enrollSelectedSpeakers() {
+  if (!identifyResult) {
+    showError('No speaker analysis results available');
+    return;
+  }
+
+  const filename = document.getElementById('enroll-file').value;
+  const assignments = {};
+  const inputs = document.querySelectorAll('#enroll-speaker-list input[data-speaker]');
+  inputs.forEach(input => {
+    const name = input.value.trim();
+    if (name) {
+      assignments[input.dataset.speaker] = name;
+    }
+  });
+
+  if (Object.keys(assignments).length === 0) {
+    showError('Enter at least one speaker name to enroll');
+    return;
+  }
+
+  const body = { filename, assignments, ...getEnrollTimeRange(false) };
+  const data = await apiCall('/api/speakers/enroll', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+
+  if (data) {
+    startSpeakerTaskPoll('enroll-save');
+  }
+}
+
+async function testRecognition() {
+  const filename = document.getElementById('test-file').value;
+  if (!filename) {
+    showError('Please select a recording first');
+    return;
+  }
+
+  document.getElementById('btn-test-recognition').disabled = true;
+  document.getElementById('test-results').style.display = 'none';
+
+  const data = await apiCall('/api/speakers/test', {
+    method: 'POST',
+    body: JSON.stringify({ filename }),
+  });
+
+  if (data) {
+    startSpeakerTaskPoll('test');
+  } else {
+    document.getElementById('btn-test-recognition').disabled = false;
+  }
+}
+
+function startSpeakerTaskPoll(mode) {
+  stopSpeakerTaskPoll();
+  speakerTaskPoll = setInterval(() => checkSpeakerTaskStatus(mode), 1000);
+}
+
+function stopSpeakerTaskPoll() {
+  if (speakerTaskPoll) { clearInterval(speakerTaskPoll); speakerTaskPoll = null; }
+}
+
+async function checkSpeakerTaskStatus(mode) {
+  const data = await apiCall('/api/speakers/task/status');
+  if (!data) return;
+
+  const banner = document.getElementById('speaker-banner');
+  const text = document.getElementById('speaker-banner-text');
+
+  if (data.active) {
+    banner.classList.add('active');
+    const stages = {
+      loading: 'Loading models...',
+      diarizing: data.detail || 'Running speaker diarization...',
+      extracting: data.detail || 'Extracting speaker embeddings...',
+      matching: data.detail || 'Matching speakers against profiles...',
+      enrolling: data.detail || 'Enrolling speakers...',
+    };
+    text.textContent = stages[data.stage] || data.detail || data.stage;
+
+    // Show diarization progress bar when available
+    const spkProg = document.getElementById('speaker-progress');
+    const spkBar = document.getElementById('speaker-bar');
+    const spkPct = document.getElementById('speaker-pct');
+    const spkStep = document.getElementById('speaker-step');
+    const sdp = data.diarize_progress;
+    if (data.stage === 'diarizing' && sdp && typeof sdp.percent === 'number') {
+      spkProg.style.display = 'block';
+      spkBar.style.width = sdp.percent + '%';
+      spkPct.textContent = sdp.percent.toFixed(1) + '%';
+      spkStep.textContent = data.detail || '';
+    } else {
+      spkProg.style.display = 'none';
+      spkBar.style.width = '0%';
+    }
+
+    if (!speakerTaskPoll) startSpeakerTaskPoll(mode);
+  } else {
+    banner.classList.remove('active');
+    document.getElementById('speaker-progress').style.display = 'none';
+    document.getElementById('speaker-bar').style.width = '0%';
+    if (data.stage === 'done') {
+      stopSpeakerTaskPoll();
+      document.getElementById('btn-analyze-speakers').disabled = false;
+      document.getElementById('btn-analyze-all').disabled = false;
+      document.getElementById('btn-test-recognition').disabled = false;
+
+      if (mode === 'enroll' && data.result && data.result.speakers) {
+        // Show speaker assignments for enrollment
+        identifyResult = data.result;
+        showEnrollmentForm(data.result);
+      } else if (mode === 'enroll-save' && data.result && data.result.enrolled) {
+        showSuccess(`Enrolled ${data.result.enrolled.length} speaker(s): ${data.result.enrolled.join(', ')}`);
+        stopSpeakerPreview();
+        document.getElementById('enroll-speakers').style.display = 'none';
+        identifyResult = null;
+        loadProfiles();
+      } else if (mode === 'test' && data.result && data.result.speakers) {
+        showTestResults(data.result.speakers);
+      }
+    } else if (data.stage === 'error' && speakerTaskPoll) {
+      stopSpeakerTaskPoll();
+      document.getElementById('btn-analyze-speakers').disabled = false;
+      document.getElementById('btn-analyze-all').disabled = false;
+      document.getElementById('btn-test-recognition').disabled = false;
+      showError('Speaker task failed: ' + data.error);
+    } else {
+      stopSpeakerTaskPoll();
+      document.getElementById('btn-analyze-speakers').disabled = false;
+      document.getElementById('btn-analyze-all').disabled = false;
+      document.getElementById('btn-test-recognition').disabled = false;
+    }
+  }
+}
+
+let _previewAudio = null;
+let _previewSpeaker = null;
+
+function showEnrollmentForm(result) {
+  const listEl = document.getElementById('enroll-speaker-list');
+  const speakers = Object.entries(result.speakers).sort((a, b) => a[0].localeCompare(b[0]));
+
+  listEl.innerHTML = speakers.map(([spk, info]) => {
+    const match = info.match;
+    const prefill = match ? match.name : '';
+    const confidence = match ? match.confidence : 0;
+    const matchBadge = match
+      ? `<span class="spk-match ${confidence >= 0.6 ? 'high' : 'low'}">${escapeHtml(match.name)} (${Math.round(confidence * 100)}%)</span>`
+      : '<span class="spk-match none">Unknown</span>';
+    const durStr = info.duration ? `${info.duration.toFixed(1)}s` : '';
+    const segStr = info.segments ? `${info.segments} seg` : '';
+
+    return `
+      <div class="speaker-assignment">
+        <button class="btn btn-ghost btn-sm spk-play-btn" id="spk-play-${escapeAttr(spk)}" onclick="toggleSpeakerPreview('${escapeAttr(spk)}')" title="Listen to this speaker">&#9654;</button>
+        <span class="spk-id">${escapeHtml(spk)}</span>
+        <span class="spk-duration">${durStr} ${segStr}</span>
+        ${matchBadge}
+        <input type="text" data-speaker="${escapeAttr(spk)}" value="${escapeAttr(prefill)}" placeholder="Enter name...">
+      </div>
+    `;
+  }).join('');
+
+  document.getElementById('enroll-speakers').style.display = 'block';
+}
+
+function toggleSpeakerPreview(speaker) {
+  // If already playing this speaker, stop
+  if (_previewAudio && _previewSpeaker === speaker) {
+    stopSpeakerPreview();
+    return;
+  }
+  // Stop any other preview first
+  stopSpeakerPreview();
+
+  if (!identifyResult || !identifyResult.speakers[speaker]) return;
+
+  const info = identifyResult.speakers[speaker];
+  if (!info.turns || info.turns.length === 0) {
+    showError('No audio segments available for this speaker');
+    return;
+  }
+
+  const filename = identifyResult.filename;
+  const segmentsParam = encodeURIComponent(JSON.stringify(info.turns));
+  const url = `/api/speakers/preview?filename=${encodeURIComponent(filename)}&segments=${segmentsParam}`;
+
+  _previewAudio = new Audio(url);
+  _previewSpeaker = speaker;
+
+  const btn = document.getElementById('spk-play-' + speaker);
+  if (btn) {
+    btn.textContent = '...';
+    btn.classList.add('playing');
+  }
+
+  _previewAudio.oncanplay = () => {
+    if (btn) btn.innerHTML = '&#9724;';  // stop square
+  };
+  _previewAudio.onended = () => stopSpeakerPreview();
+  _previewAudio.onerror = () => {
+    showError('Failed to load speaker audio preview');
+    stopSpeakerPreview();
+  };
+  _previewAudio.play().catch(() => stopSpeakerPreview());
+}
+
+function stopSpeakerPreview() {
+  if (_previewAudio) {
+    _previewAudio.pause();
+    _previewAudio.src = '';
+    _previewAudio = null;
+  }
+  if (_previewSpeaker) {
+    const btn = document.getElementById('spk-play-' + _previewSpeaker);
+    if (btn) {
+      btn.innerHTML = '&#9654;';  // play triangle
+      btn.classList.remove('playing');
+    }
+    _previewSpeaker = null;
+  }
+}
+
+function showTestResults(speakers) {
+  const listEl = document.getElementById('test-results-list');
+  const entries = Object.entries(speakers).sort((a, b) => a[0].localeCompare(b[0]));
+
+  listEl.innerHTML = entries.map(([spk, info]) => {
+    const match = info.match;
+    const durStr = info.duration ? `${info.duration.toFixed(1)}s` : '';
+    let matchHtml;
+
+    if (match) {
+      const confidence = match.confidence;
+      const pct = Math.round(confidence * 100);
+      const cls = confidence >= 0.6 ? 'high' : 'low';
+      matchHtml = `
+        <div class="result-match">
+          <div style="font-size:13px;">
+            <span style="font-weight:500; color:var(--${confidence >= 0.6 ? 'green' : 'yellow'});">${escapeHtml(match.name)}</span>
+            <span style="color:var(--text2);"> (${pct}% confidence)</span>
+          </div>
+          <div class="confidence-bar">
+            <div class="confidence-bar-fill ${cls}" style="width:${pct}%"></div>
+          </div>
+        </div>
+      `;
+    } else {
+      matchHtml = `
+        <div class="result-match">
+          <span style="font-size:13px; color:var(--text2);">No match found</span>
+          <div class="confidence-bar">
+            <div class="confidence-bar-fill" style="width:0%"></div>
+          </div>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="test-result-item">
+        <span class="result-spk">${escapeHtml(spk)}</span>
+        <span class="result-duration">${durStr}</span>
+        ${matchHtml}
+      </div>
+    `;
+  }).join('');
+
+  document.getElementById('test-results').style.display = 'block';
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────
