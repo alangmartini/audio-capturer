@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Windows system audio capture tool for meeting transcription. Records audio from any application (Teams, Zoom, etc.) via WASAPI loopback, then transcribes locally using OpenAI Whisper.
+Windows system audio capture tool for meeting transcription. Records audio from any application (Teams, Zoom, etc.) via WASAPI loopback, then transcribes locally using faster-whisper (CTranslate2).
 
 **Platform:** Windows only (WASAPI loopback). No admin permissions available on this machine.
 
@@ -12,7 +12,7 @@ Windows system audio capture tool for meeting transcription. Records audio from 
 
 ```bash
 # Install dependencies
-pip install pyaudiowpatch numpy openai-whisper
+pip install pyaudiowpatch numpy faster-whisper
 
 # Run interactive mode
 python capture.py
@@ -22,6 +22,9 @@ python capture.py --record 60
 
 # Transcribe an existing file
 python capture.py --transcribe path/to/file.wav --model base
+
+# Transcribe only a segment (times in seconds)
+python capture.py --transcribe path/to/file.wav --start-time 60 --end-time 300
 
 # List audio devices
 python capture.py --list-devices
@@ -37,14 +40,17 @@ No test suite, linter, or build system exists — this is a standalone script-ba
 
 ## Architecture
 
-Two entry points, no shared module between them:
+Two entry points with shared utility modules:
 
 - **`capture.py`** — Main tool. Contains `SystemAudioRecorder` class (WASAPI loopback capture via `pyaudiowpatch`), `transcribe_file()` function, and an interactive CLI with live RMS level display. Supports both CLI flags (`--record`, `--transcribe`, `--list-devices`) and interactive mode (keyboard-driven menu).
-- **`batch_transcribe.py`** — Standalone batch processor. Finds WAV files without a matching `.txt` and transcribes them. Has a `--watch` mode that polls for new files. Imports `whisper` at module level (unlike `capture.py` which defers the import).
+- **`batch_transcribe.py`** — Standalone batch processor. Finds WAV files without a matching `.txt` and transcribes them. Has a `--watch` mode that polls for new files.
+- **`whisper_loader.py`** — Shared helper wrapping faster-whisper: `load_whisper_model()` for model loading and `transcribe_audio()` adapter that returns openai-whisper-compatible dict format with segment-based progress tracking. When diarization is enabled, transcription and diarization run in parallel via `ThreadPoolExecutor`.
+- **`diarize.py`** — Speaker diarization module using pyannote.audio.
 
 ## Development Rules
 
 - **Frontend parity:** Every feature implemented in the CLI (`capture.py`) must also be implemented in the web frontend (`app.py` + `templates/index.html`). The two interfaces should offer equivalent functionality.
+- **User transparency:** Every operation must clearly communicate what is happening to the user at all times. This includes: model downloads (first-use vs cached), model loading, transcription progress, diarization stages (model loading, speaker analysis, merging), errors and fallbacks. Never leave the user staring at a silent process — always show status messages, progress indicators, and completion confirmations.
 
 Key details:
 - Audio callback runs on a separate thread (`_audio_callback`), protected by `threading.Lock`
