@@ -264,19 +264,28 @@ def get_speaker_list(segments):
     return seen
 
 
+def format_txt_time(seconds):
+    """Format seconds to HH:MM:SS for plain text output."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 def format_txt_with_speakers(segments):
     """
-    Format segments into plain text with speaker labels.
+    Format segments into plain text with speaker labels and timestamps.
 
     Groups consecutive segments by the same speaker into paragraphs:
-        Person 1: Hello everyone. Welcome to the meeting.
-        Person 2: Thanks for having me.
+        [00:00:00] Person 1: Hello everyone. Welcome to the meeting.
+        [00:05:30] Person 2: Thanks for having me.
     """
     if not segments:
         return ""
 
     lines = []
     current_speaker = None
+    current_start = None
     current_texts = []
 
     for seg in segments:
@@ -287,15 +296,18 @@ def format_txt_with_speakers(segments):
 
         if speaker != current_speaker:
             if current_speaker is not None and current_texts:
-                lines.append(f"{current_speaker}: {' '.join(current_texts)}")
+                ts = format_txt_time(current_start)
+                lines.append(f"[{ts}] {current_speaker}: {' '.join(current_texts)}")
             current_speaker = speaker
+            current_start = seg["start"]
             current_texts = [text]
         else:
             current_texts.append(text)
 
     # Flush last speaker
     if current_speaker is not None and current_texts:
-        lines.append(f"{current_speaker}: {' '.join(current_texts)}")
+        ts = format_txt_time(current_start)
+        lines.append(f"[{ts}] {current_speaker}: {' '.join(current_texts)}")
 
     return "\n\n".join(lines)
 
