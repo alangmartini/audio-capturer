@@ -84,7 +84,7 @@
     border-bottom-color: var(--accent);
   }
 
-  .tab-content { display: none; padding: 24px; max-width: 900px; margin: 0 auto; }
+  .tab-content { display: none; padding: 24px; padding-bottom: 80px; max-width: 900px; margin: 0 auto; }
   .tab-content.active { display: block; }
 
   /* Cards */
@@ -490,6 +490,7 @@
   .speaker-6 { color: #ff8c6c; }
   .speaker-7 { color: #6cffda; }
   .speaker-8 { color: #ff6c6c; }
+  .transcript-ts { color: var(--text2); font-weight: 400; font-size: 0.9em; }
 
   /* Diarization settings helper text */
   .help-text { color: var(--text2); font-size: 11px; margin-top: 4px; }
@@ -770,12 +771,32 @@
         <span class="elapsed" id="rec-elapsed">00:00:00</span>
         <span id="rec-file" style="font-size:12px;"></span>
       </div>
-      <div class="level-bar-container">
-        <div id="level-bar" class="level-bar"></div>
+      <!-- Single level bar (loopback only) -->
+      <div id="rec-single-level">
+        <div class="level-bar-container">
+          <div id="level-bar" class="level-bar"></div>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text2);">
+          <span>RMS: <span id="rec-rms">0.000</span></span>
+          <span>Peak: <span id="rec-peak">0.000</span></span>
+        </div>
       </div>
-      <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text2);">
-        <span>RMS: <span id="rec-rms">0.000</span></span>
-        <span>Peak: <span id="rec-peak">0.000</span></span>
+      <!-- Dual level bars (loopback + mic) -->
+      <div id="rec-dual-level" style="display:none;">
+        <div style="display:flex; align-items:center; gap:8px; font-size:12px; margin-bottom:4px;">
+          <span style="width:30px; color:var(--text2);">SYS</span>
+          <div class="level-bar-container" style="flex:1;">
+            <div id="level-bar-sys" class="level-bar"></div>
+          </div>
+          <span id="rec-rms-sys" style="width:50px; color:var(--text2);">0.0000</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; font-size:12px;">
+          <span style="width:30px; color:var(--text2);">MIC</span>
+          <div class="level-bar-container" style="flex:1;">
+            <div id="level-bar-mic-rec" class="level-bar"></div>
+          </div>
+          <span id="rec-rms-mic" style="width:50px; color:var(--text2);">0.0000</span>
+        </div>
       </div>
     </div>
   </div>
@@ -953,7 +974,35 @@
     </div>
   </div>
 
-  <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+  <div class="card">
+    <h3>Microphone Capture</h3>
+    <div class="setting-group">
+      <div class="toggle-row">
+        <label style="margin:0">Mix microphone into recording</label>
+        <label class="toggle">
+          <input type="checkbox" id="set-mic-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="help-text">When enabled, your microphone audio is mixed with system audio into a single recording file. Use this to capture both sides of a call.</div>
+      <div class="help-text" style="margin-top:8px; padding:8px 10px; border-left:3px solid var(--yellow); background:rgba(255,193,7,0.08);">
+        <strong>Bluetooth / USB headset warning:</strong> most headsets can only play high-quality stereo audio <em>or</em> act as a call mic, never both at once. If you pick the headset's mic here, Windows will switch it to call mode when recording starts — your playback will drop to mono and may cut out entirely. Use the built-in laptop mic or a separate USB mic instead.
+      </div>
+    </div>
+    <div class="setting-group">
+      <label for="set-mic-device">Microphone Device</label>
+      <select id="set-mic-device"><option value="">Default</option></select>
+    </div>
+    <div class="setting-group">
+      <label for="set-mic-volume">Microphone Volume: <span id="mic-volume-display">100%</span></label>
+      <input type="range" id="set-mic-volume" min="0" max="200" value="100" step="5" oninput="document.getElementById('mic-volume-display').textContent=this.value+'%'">
+      <div class="help-text">Adjust your voice level relative to system audio. 100% = equal, lower = quieter mic, higher = louder mic.</div>
+    </div>
+  </div>
+
+  <div style="position:sticky; bottom:0; background:linear-gradient(transparent, var(--bg) 20%); padding:16px 0 24px; z-index:10;">
+    <button class="btn btn-primary" onclick="saveSettings()" style="width:100%;">Save Settings</button>
+  </div>
 </div>
 
 <!-- ═══ Speakers Tab ═══ -->
@@ -1151,14 +1200,47 @@ async function startRecording() {
   if (dur) body.max_duration_minutes = parseInt(dur);
   if (recName) body.name = recName;
 
-  const data = await apiCall('/api/recording/start', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-  if (data) {
+  await _startRecordingRequest(body);
+}
+
+async function _startRecordingRequest(body) {
+  // Dedicated fetch so we can intercept the 409 mic-conflict case before
+  // it reaches the generic error panel.
+  let res, data;
+  try {
+    res = await fetch('/api/recording/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    data = await res.json();
+  } catch (e) {
+    showError(e.message);
+    return;
+  }
+
+  if (res.ok && data.ok) {
     setRecordingUI(true);
     startStatusPoll();
+    return;
   }
+
+  // Mic/playback share the same physical device — let the user confirm override.
+  if (res.status === 409 && data.error_code === 'mic_device_conflict') {
+    const msg =
+      `The selected microphone and playback device appear to be the same hardware:\n\n` +
+      `  Playback: ${data.loopback || 'unknown'}\n` +
+      `  Microphone: ${data.mic || 'unknown'}\n\n` +
+      `Opening the mic will force Windows to switch the headset to call mode, ` +
+      `which typically kills playback audio and can crash the loopback capture.\n\n` +
+      `Proceed anyway?`;
+    if (confirm(msg)) {
+      await _startRecordingRequest({ ...body, allow_mic_conflict: true });
+    }
+    return;
+  }
+
+  showError(data.error || `HTTP ${res.status}`, data.traceback);
 }
 
 async function stopRecording() {
@@ -1194,14 +1276,37 @@ async function pollStatus() {
     return;
   }
   document.getElementById('rec-elapsed').textContent = data.elapsed;
-  document.getElementById('rec-rms').textContent = data.rms.toFixed(4);
-  document.getElementById('rec-peak').textContent = data.peak_rms.toFixed(4);
   document.getElementById('rec-file').textContent = data.file;
 
-  const pct = Math.min(data.rms * 300, 100);
-  const bar = document.getElementById('level-bar');
-  bar.style.width = pct + '%';
-  bar.className = 'level-bar' + (pct > 80 ? ' clip' : pct > 50 ? ' hot' : '');
+  if (data.mic_enabled) {
+    // Dual level bars mode
+    document.getElementById('rec-single-level').style.display = 'none';
+    document.getElementById('rec-dual-level').style.display = 'block';
+
+    const pctSys = Math.min(data.rms * 300, 100);
+    const barSys = document.getElementById('level-bar-sys');
+    barSys.style.width = pctSys + '%';
+    barSys.className = 'level-bar' + (pctSys > 80 ? ' clip' : pctSys > 50 ? ' hot' : '');
+    document.getElementById('rec-rms-sys').textContent = data.rms.toFixed(4);
+
+    const pctMic = Math.min((data.rms_mic || 0) * 300, 100);
+    const barMic = document.getElementById('level-bar-mic-rec');
+    barMic.style.width = pctMic + '%';
+    barMic.className = 'level-bar' + (pctMic > 80 ? ' clip' : pctMic > 50 ? ' hot' : '');
+    document.getElementById('rec-rms-mic').textContent = (data.rms_mic || 0).toFixed(4);
+  } else {
+    // Single level bar mode
+    document.getElementById('rec-single-level').style.display = 'block';
+    document.getElementById('rec-dual-level').style.display = 'none';
+
+    document.getElementById('rec-rms').textContent = data.rms.toFixed(4);
+    document.getElementById('rec-peak').textContent = data.peak_rms.toFixed(4);
+
+    const pct = Math.min(data.rms * 300, 100);
+    const bar = document.getElementById('level-bar');
+    bar.style.width = pct + '%';
+    bar.className = 'level-bar' + (pct > 80 ? ' clip' : pct > 50 ? ' hot' : '');
+  }
 }
 
 // ─── Recordings ───────────────────────────────────────────────────────────
@@ -1223,6 +1328,7 @@ async function loadRecordings() {
       `<span class="badge badge-${t}">${t}</span>`
     ).join('');
     const hasTranscript = Object.keys(r.transcripts).length > 0;
+    const txtPath = r.transcripts.txt || '';
     const safeName = escapeAttr(r.name);
     const timingHtml = r.timing ? formatTiming(r.timing, safeName) : '';
     return `
@@ -1236,6 +1342,7 @@ async function loadRecordings() {
         <div class="actions">
           <button class="btn btn-ghost btn-sm" id="play-btn-${safeName}" onclick="togglePlay('${safeName}')">Play</button>
           ${hasTranscript ? `<button class="btn btn-ghost btn-sm" onclick="viewTranscript('${safeName}')">View</button>` : ''}
+          ${txtPath ? `<button class="btn btn-ghost btn-sm" data-path="${txtPath.replace(/"/g, '&quot;')}" onclick="copyTranscriptPath(this.dataset.path, this)">Copy Path</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="transcribeFile('${safeName}')">Transcribe</button>
           <button class="btn btn-ghost btn-sm" onclick="renameRecording('${safeName}')">Rename</button>
           <button class="btn btn-ghost btn-sm" onclick="downloadFile('${safeName}', 'wav')">Download</button>
@@ -1507,18 +1614,19 @@ function colorizeSpeakers(text) {
   }
 
   // Match "Person N", "Unknown", or any word(s) before ]: or : at line start
-  // Pattern 1: [SpeakerName] in SRT format
-  let result = text.replace(/\[([^\]]+)\](?= )/g, (full, name) => {
+  // Pattern 1: [SpeakerName] in SRT format (require letter start to skip timestamps like [00:05:30])
+  let result = text.replace(/\[([A-Za-z][^\]]*)\](?= )/g, (full, name) => {
     const cls = getSpeakerClass(name);
     return `[<span class="speaker-label ${cls}">${escapeHtml(name)}</span>]`;
   });
 
-  // Pattern 2: "SpeakerName: text" in plain text format (at start of line or after newline)
-  result = result.replace(/(^|\n)([A-Za-z][A-Za-z0-9 ]+?)(?=: )/gm, (full, pre, name) => {
+  // Pattern 2: "SpeakerName: text" in plain text format, with optional [HH:MM:SS] timestamp prefix
+  result = result.replace(/(^|\n)(\[\d{2}:\d{2}:\d{2}\] )?([A-Za-z][A-Za-z0-9 ]+?)(?=: )/gm, (full, pre, timestamp, name) => {
     const trimmed = name.trim();
     if (trimmed) {
       const cls = getSpeakerClass(trimmed);
-      return `${pre}<span class="speaker-label ${cls}">${escapeHtml(trimmed)}</span>`;
+      const tsHtml = timestamp ? `<span class="transcript-ts">${escapeHtml(timestamp.trim())}</span> ` : '';
+      return `${pre}${tsHtml}<span class="speaker-label ${cls}">${escapeHtml(trimmed)}</span>`;
     }
     return full;
   });
@@ -1535,6 +1643,27 @@ function renderTranscript(content, format) {
   } else {
     viewer.innerHTML = colorizeSpeakers(escapeHtml(content));
   }
+}
+
+function copyTranscriptPath(path, btn) {
+  navigator.clipboard.writeText(path).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  }).catch(() => {
+    // Fallback for non-HTTPS contexts
+    const ta = document.createElement('textarea');
+    ta.value = path;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
 }
 
 async function viewTranscript(name) {
@@ -1718,9 +1847,16 @@ async function loadSettings() {
     }
   }
 
-  // Populate device selector
+  // Microphone settings
+  document.getElementById('set-mic-enabled').checked = !!s.mic_enabled;
+  const micVol = Math.round((s.mic_volume || 1.0) * 100);
+  document.getElementById('set-mic-volume').value = micVol;
+  document.getElementById('mic-volume-display').textContent = micVol + '%';
+
+  // Populate device selectors
   const devData = await apiCall('/api/devices');
   if (devData) {
+    // Loopback device selector
     const sel = document.getElementById('set-device');
     sel.innerHTML = '<option value="">Auto-detect</option>';
     devData.devices.filter(d => d.is_loopback).forEach(d => {
@@ -1730,12 +1866,24 @@ async function loadSettings() {
       if (s.device_index === d.index) opt.selected = true;
       sel.appendChild(opt);
     });
+
+    // Mic device selector
+    const micSel = document.getElementById('set-mic-device');
+    micSel.innerHTML = '<option value="">Default</option>';
+    devData.devices.filter(d => d.is_input).forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.index;
+      opt.textContent = `[${d.index}] ${d.name}`;
+      if (s.mic_device_index === d.index) opt.selected = true;
+      micSel.appendChild(opt);
+    });
   }
 }
 
 async function saveSettings() {
   const devVal = document.getElementById('set-device').value;
   const maxSpeakers = document.getElementById('set-max-speakers').value;
+  const micDevVal = document.getElementById('set-mic-device').value;
   const body = {
     output_dir: document.getElementById('set-output-dir').value,
     whisper_model: document.getElementById('set-model').value,
@@ -1747,6 +1895,9 @@ async function saveSettings() {
     diarization_max_speakers: maxSpeakers ? parseInt(maxSpeakers) : null,
     vocabulary_terms: document.getElementById('set-vocabulary').value.trim() || null,
     hotwords: document.getElementById('set-hotwords').value.trim() || null,
+    mic_enabled: document.getElementById('set-mic-enabled').checked,
+    mic_device_index: micDevVal ? parseInt(micDevVal) : null,
+    mic_volume: parseInt(document.getElementById('set-mic-volume').value) / 100,
   };
   const data = await apiCall('/api/settings', {
     method: 'PUT',

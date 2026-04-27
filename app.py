@@ -13,10 +13,20 @@ import json
 import math
 import os
 import struct
+import sys
 import threading
 import time
 import traceback
 from pathlib import Path
+
+# Windows consoles default to cp1252 which can't encode the unicode glyphs
+# (●, ✖, ⚠) used in our log output. Switch stdio to UTF-8 so prints from
+# capture.py don't raise UnicodeEncodeError mid-recording.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -232,10 +242,33 @@ def recording_start():
     data = request.get_json(silent=True) or {}
     max_dur = data.get("max_duration_minutes")
     name = data.get("name")
+    allow_mic_conflict = bool(data.get("allow_mic_conflict", False))
 
-    ok = recorder.start(max_duration_minutes=max_dur, name=name)
+    ok = recorder.start(
+        max_duration_minutes=max_dur,
+        name=name,
+        allow_mic_conflict=allow_mic_conflict,
+    )
     if not ok:
-        return jsonify({"ok": False, "error": "Could not start recording. Check audio device."}), 500
+        err = recorder.last_error or {}
+        payload = {
+            "ok": False,
+            "error": err.get("message") or "Could not start recording. Check audio device.",
+            "error_code": err.get("code"),
+        }
+        # Pass through extra detail fields the UI needs (e.g. device names for the confirm dialog)
+        for k in ("loopback", "mic"):
+            if k in err:
+                payload[k] = err[k]
+        # After a failed start, discard the recorder. Windows WASAPI can leave a
+        # PyAudio instance in a half-cleaned state after a failed mic/stream open
+        # — subsequent attempts then surface as -9999 "Unanticipated host error"
+        # or even "No loopback device found" until the PyAudio instance is
+        # recreated. Force a fresh one on the next attempt.
+        _reset_recorder()
+        # 409 for actionable conflicts the user can resolve; 500 for hard failures
+        status = 409 if err.get("code") == "mic_device_conflict" else 500
+        return jsonify(payload), status
 
     return jsonify({"ok": True, "file": str(recorder.filepath)})
 
@@ -290,7 +323,7 @@ def list_recordings():
         for ext in (".txt", ".srt", ".json"):
             t = wav.with_suffix(ext)
             if t.exists():
-                entry["transcripts"][ext.lstrip(".")] = True
+                entry["transcripts"][ext.lstrip(".")] = str(t)
         # Read timing from JSON export if available
         json_path = wav.with_suffix(".json")
         if json_path.exists():
@@ -904,10 +937,12 @@ def list_devices():
         devices = []
         for i in range(p.get_device_count()):
             dev = p.get_device_info_by_index(i)
+            is_loopback = bool(dev.get("isLoopbackDevice", False))
             devices.append({
                 "index": i,
                 "name": dev["name"],
-                "is_loopback": bool(dev.get("isLoopbackDevice", False)),
+                "is_loopback": is_loopback,
+                "is_input": dev["maxInputChannels"] > 0 and not is_loopback,
                 "max_input_channels": dev["maxInputChannels"],
                 "max_output_channels": dev["maxOutputChannels"],
                 "sample_rate": int(dev["defaultSampleRate"]),
@@ -935,6 +970,7 @@ def update_settings():
         "output_dir", "auto_transcribe", "whisper_model", "device_index",
         "diarization_enabled", "hf_token", "diarization_max_speakers",
         "vocabulary_terms", "hotwords", "language",
+        "mic_enabled", "mic_device_index", "mic_volume",
     }
     for key in allowed_keys:
         if key in data:

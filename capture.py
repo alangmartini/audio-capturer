@@ -20,10 +20,13 @@ import argparse
 import datetime
 import json
 import os
+import queue
+import re
 import signal
 import sys
 import threading
 import time
+import traceback
 import wave
 from pathlib import Path
 
@@ -74,6 +77,9 @@ def load_config():
         "hf_token": None,
         "diarization_max_speakers": None,
         "language": None,
+        "mic_enabled": False,
+        "mic_device_index": None,
+        "mic_volume": 1.0,
     }
     if CONFIG_FILE.exists():
         try:
@@ -114,23 +120,49 @@ def get_loopback_device(p: pyaudio.PyAudio, device_index=None):
             print(f"[WARN] Device {device_index} not found. Auto-detecting...")
 
     # Auto-detect: find the default speakers' loopback
-    default_speakers = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-    print(f"[INFO] Default output device: {default_speakers['name']}")
+    default_speakers = None
+    try:
+        default_speakers = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+        print(f"[INFO] Default output device: {default_speakers['name']}")
+    except Exception as e:
+        print(f"[WARN] Could not query default output device (index={wasapi_info.get('defaultOutputDevice')}): {e}")
 
-    # Search for the loopback version of the default output
-    for i in range(p.get_device_count()):
-        dev = p.get_device_info_by_index(i)
-        if dev.get("isLoopbackDevice") and dev["name"].startswith(default_speakers["name"]):
-            return dev
+    # Enumerate once — used for both matching and diagnostics.
+    n_devices = p.get_device_count()
+    loopbacks = []
+    for i in range(n_devices):
+        try:
+            dev = p.get_device_info_by_index(i)
+        except Exception:
+            continue
+        if dev.get("isLoopbackDevice"):
+            loopbacks.append(dev)
+
+    # Prefer loopback matching the default output device
+    if default_speakers:
+        for dev in loopbacks:
+            if dev["name"].startswith(default_speakers["name"]):
+                return dev
 
     # Fallback: any loopback device
-    for i in range(p.get_device_count()):
-        dev = p.get_device_info_by_index(i)
-        if dev.get("isLoopbackDevice"):
-            print(f"[WARN] Using fallback loopback: {dev['name']}")
-            return dev
+    if loopbacks:
+        print(f"[WARN] Using fallback loopback: {loopbacks[0]['name']}")
+        return loopbacks[0]
 
-    print("[ERROR] No loopback device found.")
+    # Diagnostics: dump what we actually saw so the user (or us) can tell whether
+    # pyaudiowpatch is enumerating loopback devices at all. If this list shows
+    # only regular input/output devices with no "[Loopback]" suffix, the
+    # pyaudiowpatch install is broken or has been shadowed by vanilla pyaudio.
+    print(f"[ERROR] No loopback device found among {n_devices} enumerated devices.")
+    print(f"[DIAG]  pyaudio module: {pyaudio.__name__}  paWASAPI={pyaudio.paWASAPI}")
+    for i in range(n_devices):
+        try:
+            dev = p.get_device_info_by_index(i)
+        except Exception:
+            continue
+        print(f"[DIAG]   [{i:3d}] {dev['name']}  in={dev['maxInputChannels']} "
+              f"out={dev['maxOutputChannels']} hostApi={dev.get('hostApi')} "
+              f"loopback={bool(dev.get('isLoopbackDevice'))}")
     return None
 
 
@@ -170,6 +202,85 @@ def rms(data):
     return float(np.sqrt(np.mean(data.astype(np.float64) ** 2)))
 
 
+def resample_linear(data_int16, from_rate, to_rate):
+    """Resample int16 audio using linear interpolation (numpy only)."""
+    if from_rate == to_rate:
+        return data_int16
+    ratio = to_rate / from_rate
+    in_len = len(data_int16)
+    out_len = int(in_len * ratio)
+    if out_len == 0:
+        return np.array([], dtype=np.int16)
+    in_times = np.arange(in_len, dtype=np.float64) / from_rate
+    out_times = np.arange(out_len, dtype=np.float64) / to_rate
+    return np.interp(out_times, in_times, data_int16.astype(np.float64)).astype(np.int16)
+
+
+def mono_to_stereo(data_int16):
+    """Duplicate mono samples to stereo (interleaved L/R)."""
+    return np.column_stack((data_int16, data_int16)).flatten()
+
+
+def get_mic_device(p, mic_device_index=None):
+    """Find a microphone (non-loopback input) device."""
+    if mic_device_index is not None:
+        try:
+            dev = p.get_device_info_by_index(mic_device_index)
+            if dev["maxInputChannels"] > 0 and not dev.get("isLoopbackDevice", False):
+                return dev
+            else:
+                print(f"[WARN] Device {mic_device_index} is not a valid microphone. Using default...")
+        except Exception:
+            print(f"[WARN] Mic device {mic_device_index} not found. Using default...")
+
+    try:
+        return p.get_default_input_device_info()
+    except OSError:
+        print("[WARN] No default microphone found.")
+        return None
+
+
+def _extract_device_identity(name):
+    """Extract a distinctive hardware identifier from a Windows audio device name.
+
+    Windows typically names devices like "Speakers (Brand Model)" / "Microphone (Brand Model)".
+    The parenthesized part identifies the physical device. WASAPI loopback entries may
+    append a suffix like " [Loopback]" which we strip. Some drivers produce nested parens
+    (e.g. "Microphone Array (Realtek(R) Audio)"), so we take the span between the first '('
+    and the last ')' to get the full outermost identifier rather than an inner fragment.
+    """
+    if not name:
+        return ""
+    s = re.sub(r"\s*\[[^\]]*\]\s*$", "", name).strip()
+    first = s.find("(")
+    last = s.rfind(")")
+    if first != -1 and last > first:
+        return s[first + 1:last].strip().lower()
+    return s.strip().lower()
+
+
+def detect_device_conflict(loopback_device, mic_device):
+    """Return True if the loopback output and mic input share a physical device.
+
+    Typical case: a Bluetooth or USB headset exposes both a speaker and a mic with the
+    same hardware name. Opening the mic forces Windows to switch Bluetooth profile from
+    A2DP (stereo playback) to HFP (mono call mode), which degrades/kills playback and
+    invalidates the WASAPI loopback stream already capturing it.
+    """
+    if not loopback_device or not mic_device:
+        return False
+    lb_id = _extract_device_identity(loopback_device.get("name", ""))
+    mic_id = _extract_device_identity(mic_device.get("name", ""))
+    if not lb_id or not mic_id:
+        return False
+    if lb_id == mic_id:
+        return True
+    # Substring match with a minimum length to avoid matching generic words like "audio"
+    if len(lb_id) >= 6 and (lb_id in mic_id or mic_id in lb_id):
+        return True
+    return False
+
+
 # ─── Recorder Class ──────────────────────────────────────────────────────────
 
 class SystemAudioRecorder:
@@ -190,6 +301,23 @@ class SystemAudioRecorder:
         self.current_rms = 0.0
         self._lock = threading.Lock()
 
+        # Microphone mixing
+        self.mic_stream = None
+        self.mic_enabled = bool(config.get("mic_enabled", False))
+        self.mic_device_index = config.get("mic_device_index")
+        self.mic_volume = float(config.get("mic_volume", 1.0))
+        self._loopback_queue = None
+        self._mic_queue = None
+        self._mixer_thread = None
+        self._mixer_stop = threading.Event()
+        self.current_rms_mic = 0.0
+        self.mic_sample_rate = None
+        self.mic_channels = None
+
+        # Structured error from the last failed start() — consumed by the web API
+        # to surface actionable messages (e.g. Bluetooth headset conflict).
+        self.last_error = None
+
     def _generate_filename(self, name=None):
         """Generate a filename inside a per-recording subfolder."""
         ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -202,15 +330,73 @@ class SystemAudioRecorder:
         folder.mkdir(parents=True, exist_ok=True)
         return folder / f"{stem}.wav"
 
-    def start(self, max_duration_minutes=None, name=None):
-        """Begin recording system audio."""
+    def _reinit_pyaudio(self):
+        """Recreate the PyAudio instance.
+
+        Windows WASAPI can refuse to reopen a loopback device on a PyAudio
+        instance that already used it, returning "Unanticipated host error"
+        (-9999). A fresh instance sidesteps that by forcing PortAudio to
+        re-initialize COM and re-enumerate the host API.
+        """
+        if self.p is not None:
+            try:
+                self.p.terminate()
+            except Exception:
+                pass
+        self.p = pyaudio.PyAudio()
+
+    def start(self, max_duration_minutes=None, name=None, allow_mic_conflict=False):
+        """Begin recording system audio (optionally mixed with microphone).
+
+        allow_mic_conflict: when True, skip the Bluetooth-headset safety check
+        (caller has acknowledged that opening the mic will likely degrade playback).
+        """
+        self.last_error = None
+
+        # Fresh PyAudio per start() prevents Windows from refusing a reopen with
+        # -9999 after a prior recording on the same instance.
+        self._reinit_pyaudio()
+
         device = get_loopback_device(self.p, self.config.get("device_index"))
         if device is None:
+            self.last_error = {
+                "code": "no_loopback",
+                "message": (
+                    "No WASAPI loopback device found. This usually means pyaudiowpatch "
+                    "isn't loading loopback support correctly — try fully restarting the "
+                    "app (not just auto-reload). Check the terminal for the [DIAG] lines "
+                    "showing which devices were enumerated."
+                ),
+            }
             return False
 
         self.device = device
         self.channels = device["maxInputChannels"]
         self.sample_rate = int(device["defaultSampleRate"])
+
+        # Resolve mic device up front so we can detect conflicts BEFORE touching
+        # any file or audio-stream resources (nothing to clean up if we abort here).
+        mic_device = None
+        if self.mic_enabled:
+            mic_device = get_mic_device(self.p, self.mic_device_index)
+            if mic_device is None:
+                print("  ⚠ Microphone not found — recording system audio only")
+            elif not allow_mic_conflict and detect_device_conflict(device, mic_device):
+                self.last_error = {
+                    "code": "mic_device_conflict",
+                    "message": (
+                        f"The selected microphone and the playback device appear to be the same "
+                        f"physical hardware (likely a Bluetooth or USB headset). Opening the mic "
+                        f"will force Windows to switch the headset into call mode, killing audio "
+                        f"playback and the loopback capture. Pick a different microphone (built-in "
+                        f"laptop mic, USB mic) or confirm to proceed anyway."
+                    ),
+                    "loopback": device["name"],
+                    "mic": mic_device["name"],
+                }
+                print(f"  ✖ Aborting: mic/playback device conflict — {mic_device['name']}")
+                return False
+
         self.filepath = self._generate_filename(name)
 
         print(f"\n  ● Recording from: {device['name']}")
@@ -218,7 +404,6 @@ class SystemAudioRecorder:
         print(f"  ● Saving to: {self.filepath}")
         if max_duration_minutes:
             print(f"  ● Auto-stop after: {max_duration_minutes} minutes")
-        print()
 
         # Open WAV file
         self.wav_file = wave.open(str(self.filepath), "wb")
@@ -226,22 +411,101 @@ class SystemAudioRecorder:
         self.wav_file.setsampwidth(2)  # 16-bit
         self.wav_file.setframerate(self.sample_rate)
 
-        # Open audio stream
-        self.stream = self.p.open(
-            format=pyaudio.paInt16,
-            channels=self.channels,
-            rate=self.sample_rate,
-            input=True,
-            input_device_index=device["index"],
-            frames_per_buffer=CHUNK_SIZE,
-            stream_callback=self._audio_callback,
-        )
+        if mic_device:
+            # Dual-stream mode: loopback + mic via mixer thread
+            self.mic_sample_rate = int(mic_device["defaultSampleRate"])
+            max_mic_ch = int(mic_device["maxInputChannels"])
+            print(f"  ● Microphone: {mic_device['name']}")
+
+            self._loopback_queue = queue.Queue(maxsize=200)
+            self._mic_queue = queue.Queue(maxsize=200)
+            self._mixer_stop.clear()
+
+            # Open loopback stream (queued callback)
+            self.stream = self.p.open(
+                format=pyaudio.paInt16,
+                channels=self.channels,
+                rate=self.sample_rate,
+                input=True,
+                input_device_index=device["index"],
+                frames_per_buffer=CHUNK_SIZE,
+                stream_callback=self._loopback_callback_queued,
+            )
+
+            # Open mic stream. `maxInputChannels` is what the device advertises
+            # but WASAPI shared mode refuses anything that doesn't match the
+            # device's current mix format — array mics that report 4/8 channels
+            # typically only open at 1 or 2. Try the advertised count first,
+            # then fall back to stereo and mono before giving up.
+            candidates = []
+            for ch in (max_mic_ch, 2, 1):
+                if ch >= 1 and ch not in candidates:
+                    candidates.append(ch)
+
+            mic_last_error = None
+            self.mic_channels = None
+            for ch in candidates:
+                try:
+                    self.mic_stream = self.p.open(
+                        format=pyaudio.paInt16,
+                        channels=ch,
+                        rate=self.mic_sample_rate,
+                        input=True,
+                        input_device_index=mic_device["index"],
+                        frames_per_buffer=CHUNK_SIZE,
+                        stream_callback=self._mic_callback,
+                    )
+                    self.mic_channels = ch
+                    if ch != max_mic_ch:
+                        print(f"  ⚠ Mic opened at {ch} ch (device reported {max_mic_ch} — driver refused)")
+                    break
+                except OSError as e:
+                    mic_last_error = e
+                    continue
+
+            if self.mic_channels is None:
+                self._abort_start_cleanup()
+                self.last_error = {
+                    "code": "mic_open_failed",
+                    "message": (
+                        f"Could not open microphone '{mic_device['name']}' at any of "
+                        f"{candidates} channels: {mic_last_error}. This often happens with "
+                        f"Bluetooth headsets when the device is already in use by another app, "
+                        f"or when Windows refuses to switch audio profiles."
+                    ),
+                    "mic": mic_device["name"],
+                }
+                print(f"  ✖ Mic stream failed to open: {mic_last_error}")
+                return False
+
+            print(f"  ● Mic rate: {self.mic_sample_rate} Hz  channels: {self.mic_channels}  volume: {self.mic_volume:.0%}")
+        else:
+            # Single-stream mode: loopback only (original path)
+            self.stream = self.p.open(
+                format=pyaudio.paInt16,
+                channels=self.channels,
+                rate=self.sample_rate,
+                input=True,
+                input_device_index=device["index"],
+                frames_per_buffer=CHUNK_SIZE,
+                stream_callback=self._audio_callback,
+            )
+
+        print()
 
         self.is_recording = True
         self.frames_written = 0
         self.start_time = time.time()
         self.peak_rms = 0.0
+        self.current_rms_mic = 0.0
+        self._loopback_callback_seen = False
+        self._mic_callback_seen = False
         self.stream.start_stream()
+
+        if mic_device and self.mic_stream:
+            self.mic_stream.start_stream()
+            self._mixer_thread = threading.Thread(target=self._mixer_loop, daemon=True)
+            self._mixer_thread.start()
 
         # Auto-stop timer
         if max_duration_minutes:
@@ -269,12 +533,208 @@ class SystemAudioRecorder:
 
         return (None, pyaudio.paContinue)
 
+    def _loopback_callback_queued(self, in_data, frame_count, time_info, status):
+        """Loopback callback that pushes to queue (used when mic mixing is active)."""
+        if not self.is_recording:
+            return (None, pyaudio.paComplete)
+
+        if not self._loopback_callback_seen:
+            self._loopback_callback_seen = True
+            print(f"[LOOPBACK] first callback: {len(in_data)} bytes / {frame_count} frames  status={status}")
+
+        arr = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
+        self.current_rms = rms(arr)
+        self.peak_rms = max(self.peak_rms, self.current_rms)
+
+        try:
+            self._loopback_queue.put_nowait(in_data)
+        except queue.Full:
+            pass  # Drop frame rather than block audio thread
+
+        return (None, pyaudio.paContinue)
+
+    def _mic_callback(self, in_data, frame_count, time_info, status):
+        """Microphone callback that pushes to queue."""
+        if not self.is_recording:
+            return (None, pyaudio.paComplete)
+
+        if not self._mic_callback_seen:
+            self._mic_callback_seen = True
+            print(f"[MIC] first callback: {len(in_data)} bytes / {frame_count} frames  status={status}")
+
+        arr = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
+        self.current_rms_mic = rms(arr)
+
+        try:
+            self._mic_queue.put_nowait(in_data)
+        except queue.Full:
+            pass  # Drop frame rather than block audio thread
+
+        return (None, pyaudio.paContinue)
+
+    def _mixer_loop(self):
+        """Mixer thread, mic-driven.
+
+        Mic is the time reference because WASAPI loopback only delivers callbacks
+        while the OS audio engine is actively rendering — during silence (no app
+        playing audio) loopback fires nothing at all, not even zeros. If we used
+        loopback as the clock, mic data would be discarded during those gaps.
+        Mic-driven means: every mic chunk → write a chunk to disk, mixing in
+        whatever loopback we have buffered (and silence if we have none).
+        """
+        print(f"[MIXER] thread started (lb={self.sample_rate}Hz/{self.channels}ch  "
+              f"mic={self.mic_sample_rate}Hz/{self.mic_channels}ch)  mic-driven")
+        lb_buffer = bytearray()
+        bytes_per_lb_frame = 2 * self.channels
+        first_write_logged = False
+        first_lb_logged = False
+        empty_mic_iters = 0
+        chunks_with_lb = 0
+        chunks_silent = 0
+
+        try:
+            while not self._mixer_stop.is_set():
+                # Get next mic chunk (mic always fires steady callbacks)
+                try:
+                    mic_data = self._mic_queue.get(timeout=0.1)
+                except queue.Empty:
+                    empty_mic_iters += 1
+                    if empty_mic_iters in (10, 50, 100):
+                        print(f"[MIXER] WARNING: no mic data after ~{empty_mic_iters/10:.0f}s — "
+                              f"mic callback may not be firing.")
+                    continue
+                empty_mic_iters = 0
+
+                # Drain all available loopback data into rolling buffer
+                while True:
+                    try:
+                        lb_chunk = self._loopback_queue.get_nowait()
+                        lb_buffer.extend(lb_chunk)
+                        if not first_lb_logged:
+                            print("[MIXER] loopback queue began delivering")
+                            first_lb_logged = True
+                    except queue.Empty:
+                        break
+
+                # Process mic chunk: bytes → int16 array
+                mic_arr = np.frombuffer(mic_data, dtype=np.int16)
+
+                # Mic channel conversion to match output (loopback) channels
+                if self.mic_channels == 1 and self.channels == 2:
+                    mic_arr = mono_to_stereo(mic_arr)
+                elif self.mic_channels == 2 and self.channels == 1:
+                    mic_arr = mic_arr[::2]  # take left channel only
+                elif self.mic_channels != self.channels:
+                    # Multi-channel mic → take first channel, then upmix if needed
+                    mic_arr = mic_arr[::self.mic_channels]
+                    if self.channels == 2:
+                        mic_arr = mono_to_stereo(mic_arr)
+
+                # Resample mic to loopback rate (output WAV is at loopback rate)
+                if self.mic_sample_rate != self.sample_rate:
+                    if self.channels == 2:
+                        left = resample_linear(mic_arr[0::2], self.mic_sample_rate, self.sample_rate)
+                        right = resample_linear(mic_arr[1::2], self.mic_sample_rate, self.sample_rate)
+                        mic_arr = np.column_stack((left, right)).flatten()
+                    else:
+                        mic_arr = resample_linear(mic_arr, self.mic_sample_rate, self.sample_rate)
+
+                # Now mic_arr is in loopback-rate, loopback-channel format.
+                # Pull the same number of bytes from the loopback buffer, or pad
+                # with silence if loopback hasn't kept up (or isn't firing at all).
+                needed_lb_bytes = mic_arr.nbytes
+                if len(lb_buffer) >= needed_lb_bytes:
+                    lb_raw = bytes(lb_buffer[:needed_lb_bytes])
+                    del lb_buffer[:needed_lb_bytes]
+                    chunks_with_lb += 1
+                else:
+                    # Use whatever loopback we have; zero-pad the rest
+                    lb_raw = bytes(lb_buffer) + b'\x00' * (needed_lb_bytes - len(lb_buffer))
+                    lb_buffer.clear()
+                    chunks_silent += 1
+
+                lb_arr = np.frombuffer(lb_raw, dtype=np.int16)
+
+                # Mix in float space, clip, back to int16
+                mic_f = mic_arr.astype(np.float32) * self.mic_volume
+                lb_f = lb_arr.astype(np.float32)
+                mixed = np.clip(lb_f + mic_f, -32768, 32767).astype(np.int16)
+
+                with self._lock:
+                    if self.wav_file:
+                        self.wav_file.writeframes(mixed.tobytes())
+                        self.frames_written += len(mixed) // self.channels
+                        if not first_write_logged:
+                            print(f"[MIXER] first frame written ({len(mixed) // self.channels} frames)")
+                            first_write_logged = True
+
+                # Don't let lb_buffer grow without bound if loopback fires faster
+                # than mic (rare, but possible). Cap at ~2s of audio.
+                max_lb_buffer = bytes_per_lb_frame * self.sample_rate * 2
+                if len(lb_buffer) > max_lb_buffer:
+                    overflow = len(lb_buffer) - max_lb_buffer
+                    del lb_buffer[:overflow]
+        except Exception as exc:
+            print(f"[MIXER] FATAL exception — thread is dying:\n{traceback.format_exc()}")
+            self.last_error = {
+                "code": "mixer_crashed",
+                "message": f"Mixer thread crashed: {exc}",
+            }
+            return
+
+        print(f"[MIXER] thread exiting (frames_written={self.frames_written}, "
+              f"chunks_with_loopback={chunks_with_lb}, chunks_silent={chunks_silent})")
+
+    def _abort_start_cleanup(self):
+        """Undo partial state from a failed start() call.
+
+        Closes any already-opened loopback stream and wav file, then removes the
+        empty wav file and (if empty) the recording subfolder so a failed attempt
+        doesn't leave orphan files behind.
+        """
+        if self.stream is not None:
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+
+        if self.wav_file is not None:
+            try:
+                self.wav_file.close()
+            except Exception:
+                pass
+            self.wav_file = None
+
+        try:
+            fp = getattr(self, "filepath", None)
+            if fp and fp.exists():
+                fp.unlink()
+                # Remove the per-recording subfolder if it's now empty
+                parent = fp.parent
+                if parent != self.output_dir and parent.exists() and not any(parent.iterdir()):
+                    parent.rmdir()
+        except Exception:
+            pass
+
     def stop(self):
         """Stop recording and finalize the WAV file."""
         if not self.is_recording:
             return None
 
         self.is_recording = False
+
+        # Stop mixer thread first (so it drains remaining data)
+        if self._mixer_thread and self._mixer_thread.is_alive():
+            self._mixer_stop.set()
+            self._mixer_thread.join(timeout=2)
+            self._mixer_thread = None
+
+        # Stop mic stream
+        if self.mic_stream:
+            self.mic_stream.stop_stream()
+            self.mic_stream.close()
+            self.mic_stream = None
 
         if self.stream:
             self.stream.stop_stream()
@@ -308,6 +768,8 @@ class SystemAudioRecorder:
             "peak_rms": self.peak_rms,
             "frames": self.frames_written,
             "file": str(self.filepath),
+            "mic_enabled": self.mic_enabled and self.mic_stream is not None,
+            "rms_mic": self.current_rms_mic,
         }
 
     def cleanup(self):
@@ -919,13 +1381,22 @@ def interactive_mode():
         status = recorder.get_status()
         if status["recording"]:
             # Show live recording status
-            level = min(int(status["rms"] * 200), 30)
-            bar = "█" * level + "░" * (30 - level)
-            print(
-                f"\r  ● REC {status['elapsed']}  [{bar}]  ",
-                end="",
-                flush=True,
-            )
+            if status.get("mic_enabled"):
+                lb_level = min(int(status["rms"] * 200), 15)
+                mic_level = min(int(status.get("rms_mic", 0) * 200), 15)
+                lb_bar = "█" * lb_level + "░" * (15 - lb_level)
+                mic_bar = "█" * mic_level + "░" * (15 - mic_level)
+                print(
+                    f"\r  ● REC {status['elapsed']}  SYS[{lb_bar}] MIC[{mic_bar}]  ",
+                    end="", flush=True,
+                )
+            else:
+                level = min(int(status["rms"] * 200), 30)
+                bar = "█" * level + "░" * (30 - level)
+                print(
+                    f"\r  ● REC {status['elapsed']}  [{bar}]  ",
+                    end="", flush=True,
+                )
             time.sleep(0.2)
             # Check for keypress (non-blocking)
             if _kbhit():
@@ -1063,11 +1534,15 @@ def interactive_mode():
                 list_devices()
 
             elif choice == "c":
+                mic_status = "on" if config.get("mic_enabled") else "off"
                 print(f"\n  Current config:")
                 print(f"    Output dir:      {config['output_dir']}")
                 print(f"    Auto-transcribe: {config['auto_transcribe']}")
                 print(f"    Whisper model:   {config['whisper_model']}")
                 print(f"    Device index:    {config.get('device_index', 'auto')}")
+                print(f"    Mic capture:     {mic_status}")
+                print(f"    Mic device:      {config.get('mic_device_index', 'auto')}")
+                print(f"    Mic volume:      {config.get('mic_volume', 1.0):.0%}")
                 print()
                 new_dir = input(f"  Output directory [{config['output_dir']}]: ").strip()
                 if new_dir:
@@ -1085,6 +1560,23 @@ def interactive_mode():
                     config["device_index"] = None
                 elif dev.isdigit():
                     config["device_index"] = int(dev)
+                mic = input(f"  Mic capture (on/off) [{mic_status}]: ").strip().lower()
+                if mic in ("on", "yes", "y"):
+                    config["mic_enabled"] = True
+                elif mic in ("off", "no", "n"):
+                    config["mic_enabled"] = False
+                mic_dev = input(f"  Mic device index (number or 'auto') [{config.get('mic_device_index', 'auto')}]: ").strip()
+                if mic_dev == "auto":
+                    config["mic_device_index"] = None
+                elif mic_dev.isdigit():
+                    config["mic_device_index"] = int(mic_dev)
+                mic_vol = input(f"  Mic volume 0.0-2.0 [{config.get('mic_volume', 1.0)}]: ").strip()
+                if mic_vol:
+                    try:
+                        vol = float(mic_vol)
+                        config["mic_volume"] = max(0.0, min(2.0, vol))
+                    except ValueError:
+                        pass
                 save_config(config)
                 recorder = SystemAudioRecorder(config)
                 print("  ✓ Config saved.\n")
@@ -1192,6 +1684,29 @@ def main():
         default=None,
         help="End time in seconds for partial transcription",
     )
+    parser.add_argument(
+        "--mic",
+        action="store_true",
+        help="Enable microphone capture (mixed with system audio)",
+    )
+    parser.add_argument(
+        "--mic-device",
+        type=int,
+        default=None,
+        help="Microphone device index (default: system default)",
+    )
+    parser.add_argument(
+        "--mic-volume",
+        type=float,
+        default=None,
+        help="Microphone volume multiplier 0.0-2.0 (default: 1.0)",
+    )
+    parser.add_argument(
+        "--allow-mic-conflict",
+        action="store_true",
+        help="Proceed even if the mic and playback device share hardware (Bluetooth/USB headset). "
+             "Warning: this typically kills playback by forcing the headset into call mode.",
+    )
 
     args = parser.parse_args()
 
@@ -1211,6 +1726,12 @@ def main():
             config["output_dir"] = args.output_dir
         if args.device is not None:
             config["device_index"] = args.device
+        if args.mic:
+            config["mic_enabled"] = True
+        if args.mic_device is not None:
+            config["mic_device_index"] = args.mic_device
+        if args.mic_volume is not None:
+            config["mic_volume"] = max(0.0, min(2.0, args.mic_volume))
         recorder = SystemAudioRecorder(config)
 
         def on_sigint(sig, frame):
@@ -1221,22 +1742,41 @@ def main():
         signal.signal(signal.SIGINT, on_sigint)
 
         print_banner()
-        if recorder.start(max_duration_minutes=args.record, name=args.name):
+        if recorder.start(
+            max_duration_minutes=args.record,
+            name=args.name,
+            allow_mic_conflict=args.allow_mic_conflict,
+        ):
             print("  Recording... Press Ctrl+C to stop early.\n")
             while recorder.is_recording:
                 status = recorder.get_status()
-                level = min(int(status["rms"] * 200), 30)
-                bar = "█" * level + "░" * (30 - level)
-                print(
-                    f"\r  ● REC {status['elapsed']}  [{bar}]  ",
-                    end="",
-                    flush=True,
-                )
+                if status.get("mic_enabled"):
+                    lb_level = min(int(status["rms"] * 200), 15)
+                    mic_level = min(int(status.get("rms_mic", 0) * 200), 15)
+                    lb_bar = "█" * lb_level + "░" * (15 - lb_level)
+                    mic_bar = "█" * mic_level + "░" * (15 - mic_level)
+                    print(
+                        f"\r  ● REC {status['elapsed']}  SYS[{lb_bar}] MIC[{mic_bar}]  ",
+                        end="", flush=True,
+                    )
+                else:
+                    level = min(int(status["rms"] * 200), 30)
+                    bar = "█" * level + "░" * (30 - level)
+                    print(
+                        f"\r  ● REC {status['elapsed']}  [{bar}]  ",
+                        end="", flush=True,
+                    )
                 time.sleep(0.3)
             filepath = recorder.stop()
             if filepath and config.get("auto_transcribe"):
                 model = args.model or config.get("whisper_model", "base")
                 transcribe_file(filepath, model)
+        else:
+            err = recorder.last_error or {}
+            msg = err.get("message", "Could not start recording. Check audio device.")
+            print(f"\n  [ERROR] {msg}")
+            if err.get("code") == "mic_device_conflict":
+                print("  Re-run with --allow-mic-conflict to proceed anyway.\n")
         recorder.cleanup()
         return
 
