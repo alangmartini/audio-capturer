@@ -421,20 +421,15 @@ class SystemAudioRecorder:
             self._mic_queue = queue.Queue(maxsize=200)
             self._mixer_stop.clear()
 
-            # Open loopback stream (queued callback)
-            self.stream = self.p.open(
-                format=pyaudio.paInt16,
-                channels=self.channels,
-                rate=self.sample_rate,
-                input=True,
-                input_device_index=device["index"],
-                frames_per_buffer=CHUNK_SIZE,
-                stream_callback=self._loopback_callback_queued,
-            )
+            # Order matters: open the mic stream BEFORE the loopback stream.
+            # If we open loopback first then open a regular WASAPI input
+            # (mic) afterwards, the loopback never delivers a single callback
+            # — likely a PortAudio/WASAPI COM-state quirk. Opening mic first
+            # avoids that and both streams fire correctly.
 
-            # Open mic stream. `maxInputChannels` is what the device advertises
-            # but WASAPI shared mode refuses anything that doesn't match the
-            # device's current mix format — array mics that report 4/8 channels
+            # `maxInputChannels` is what the device advertises but WASAPI
+            # shared mode refuses anything that doesn't match the device's
+            # current mix format — array mics that report 4/8 channels
             # typically only open at 1 or 2. Try the advertised count first,
             # then fall back to stereo and mono before giving up.
             candidates = []
@@ -478,6 +473,18 @@ class SystemAudioRecorder:
                 print(f"  ✖ Mic stream failed to open: {mic_last_error}")
                 return False
 
+            # Now open the loopback stream (queued callback). Mic is open first
+            # so WASAPI's COM state is settled before the loopback registers.
+            self.stream = self.p.open(
+                format=pyaudio.paInt16,
+                channels=self.channels,
+                rate=self.sample_rate,
+                input=True,
+                input_device_index=device["index"],
+                frames_per_buffer=CHUNK_SIZE,
+                stream_callback=self._loopback_callback_queued,
+            )
+
             print(f"  ● Mic rate: {self.mic_sample_rate} Hz  channels: {self.mic_channels}  volume: {self.mic_volume:.0%}")
         else:
             # Single-stream mode: loopback only (original path)
@@ -500,10 +507,17 @@ class SystemAudioRecorder:
         self.current_rms_mic = 0.0
         self._loopback_callback_seen = False
         self._mic_callback_seen = False
+
+        # Start the mic stream BEFORE the loopback stream. WASAPI is order-
+        # sensitive: starting loopback first then starting a regular input
+        # afterwards makes the second start_stream() silently kill callbacks
+        # on the first. Mic-then-loopback start order keeps both alive.
+        if mic_device and self.mic_stream:
+            self.mic_stream.start_stream()
+
         self.stream.start_stream()
 
         if mic_device and self.mic_stream:
-            self.mic_stream.start_stream()
             self._mixer_thread = threading.Thread(target=self._mixer_loop, daemon=True)
             self._mixer_thread.start()
 
