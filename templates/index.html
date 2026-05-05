@@ -1390,6 +1390,7 @@ async function loadRecordings() {
           ${hasTranscript ? `<button class="btn btn-ghost btn-sm" onclick="viewTranscript('${safeName}')">View</button>` : ''}
           ${txtPath ? `<button class="btn btn-ghost btn-sm" data-path="${txtPath.replace(/"/g, '&quot;')}" onclick="copyTranscriptPath(this.dataset.path, this)">Copy Path</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="transcribeFile('${safeName}')">Transcribe</button>
+          <button class="btn btn-ghost btn-sm" onclick="sendRecording('${safeName}')">Send</button>
           <button class="btn btn-ghost btn-sm" onclick="renameRecording('${safeName}')">Rename</button>
           <button class="btn btn-ghost btn-sm" onclick="downloadFile('${safeName}', 'wav')">Download</button>
           <button class="btn btn-danger btn-sm" onclick="deleteRecording('${safeName}')">Delete</button>
@@ -1791,6 +1792,25 @@ function onAudioPause(name) {
 
 function downloadFile(name, format) {
   window.open(`/api/recordings/${encodeURIComponent(name)}/download?format=${format}`, '_blank');
+}
+
+async function sendRecording(name) {
+  const settings = await apiCall('/api/settings');
+  const defaults = settings && settings.settings ? settings.settings : {};
+  const defaultUrl = defaults.remote_upload_url || document.getElementById('rec-remote-url')?.value || '';
+  const defaultPath = defaults.remote_upload_path || document.getElementById('rec-remote-path')?.value || 'audio-inbox';
+  const uploadUrl = prompt(`Send "${name}" to exposer URL:`, defaultUrl);
+  if (!uploadUrl || !uploadUrl.trim()) return;
+  const uploadPath = prompt('Remote folder:', defaultPath) || defaultPath;
+
+  const data = await apiCall(`/api/recordings/${encodeURIComponent(name)}/upload`, {
+    method: 'POST',
+    body: JSON.stringify({
+      remote_upload_url: uploadUrl.trim(),
+      remote_upload_path: uploadPath.trim() || 'audio-inbox',
+    }),
+  });
+  if (data) showSuccess(`Sent to ${data.remote_path}`);
 }
 
 async function openRecordingsFolder() {

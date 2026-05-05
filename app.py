@@ -411,6 +411,32 @@ def download_recording(name):
     return send_file(str(target), as_attachment=True)
 
 
+@app.route("/api/recordings/<name>/upload", methods=["POST"])
+def upload_recording_to_exposer(name):
+    data = request.get_json(silent=True) or {}
+    server_url = data.get("remote_upload_url")
+    remote_path = data.get("remote_upload_path") or "audio-inbox"
+    if not server_url:
+        return jsonify({"ok": False, "error": "Upload URL is required"}), 400
+
+    out_dir = _get_output_dir()
+    wav_path = resolve_wav(out_dir, name)
+    if not wav_path.exists():
+        return jsonify({"ok": False, "error": f"File not found: {name}"}), 404
+
+    config = load_config()
+    config.update({
+        "remote_upload_enabled": True,
+        "remote_upload_url": server_url,
+        "remote_upload_path": remote_path,
+    })
+    result = maybe_upload_recording(wav_path, config)
+    if not result:
+        return jsonify({"ok": False, "error": "Upload failed"}), 500
+
+    return jsonify({"ok": True, "remote_path": result["remote_path"]})
+
+
 @app.route("/api/recordings/<name>/duration")
 def get_duration(name):
     out_dir = _get_output_dir()
