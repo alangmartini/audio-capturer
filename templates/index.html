@@ -780,6 +780,7 @@
         <input type="text" id="rec-remote-path" placeholder="audio-inbox">
       </div>
     </div>
+    <button class="btn btn-ghost btn-sm" type="button" onclick="testRemoteUpload('rec')">Test Exposer</button>
     <div style="display:flex; gap:12px; margin-bottom:12px;">
       <button id="btn-start" class="btn btn-primary" onclick="startRecording()">Start Recording</button>
       <button id="btn-stop" class="btn btn-danger" onclick="stopRecording()" disabled>Stop Recording</button>
@@ -899,6 +900,7 @@
       <label for="set-remote-url">Exposer URL</label>
       <input type="text" id="set-remote-url" placeholder="http://beelink:8080">
     </div>
+    <button class="btn btn-ghost btn-sm" type="button" onclick="testRemoteUpload('set')">Test Exposer</button>
     <div class="setting-group">
       <label for="set-remote-path">Remote Folder</label>
       <input type="text" id="set-remote-path" placeholder="audio-inbox">
@@ -1811,6 +1813,24 @@ async function sendRecording(name) {
     }),
   });
   if (data) showSuccess(`Sent to ${data.remote_path}`);
+}
+
+async function testRemoteUpload(scope) {
+  const inputId = scope === 'set' ? 'set-remote-url' : 'rec-remote-url';
+  const uploadUrl = document.getElementById(inputId).value.trim();
+  if (!uploadUrl) {
+    showError('Upload URL is required');
+    return;
+  }
+
+  const data = await apiCall('/api/remote-upload/test', {
+    method: 'POST',
+    body: JSON.stringify({ remote_upload_url: uploadUrl }),
+  });
+  if (data) {
+    const addresses = data.addresses && data.addresses.length ? ` (${data.addresses.join(', ')})` : '';
+    showSuccess(`Python can reach ${data.host}:${data.port}${addresses}`);
+  }
 }
 
 async function openRecordingsFolder() {

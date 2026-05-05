@@ -1036,6 +1036,25 @@ def update_settings():
 
 # ─── Diarization status ───────────────────────────────────────────────────
 
+@app.route("/api/remote-upload/test", methods=["POST"])
+def remote_upload_test():
+    data = request.get_json(silent=True) or {}
+    server_url = data.get("remote_upload_url")
+    if not server_url:
+        return jsonify({"ok": False, "error": "Upload URL is required"}), 400
+
+    try:
+        from remote_upload import test_connection
+
+        result = test_connection(server_url)
+        return jsonify({"ok": True, **result})
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }), 502
+
+
 @app.route("/api/diarization/status")
 def diarization_status():
     from diarize import is_diarization_available

@@ -121,7 +121,7 @@ def maybe_upload_recording(filepath, config):
         print(f"  Uploaded to beelink: {result['remote_path']}")
         return result
     except Exception as exc:
-        print(f"\n  [WARN] Remote upload failed: {exc}")
+        print(f"\n  [WARN] Remote upload failed: {type(exc).__name__}: {exc}")
         return None
 
 
