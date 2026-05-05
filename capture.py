@@ -80,6 +80,9 @@ def load_config():
         "mic_enabled": False,
         "mic_device_index": None,
         "mic_volume": 1.0,
+        "remote_upload_enabled": False,
+        "remote_upload_url": None,
+        "remote_upload_path": "audio-inbox",
     }
     if CONFIG_FILE.exists():
         try:
@@ -95,6 +98,31 @@ def save_config(config):
     """Persist configuration to disk."""
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
+
+
+def maybe_upload_recording(filepath, config):
+    """Upload a finalized WAV to a remote exposer instance when configured."""
+    if not filepath or not config.get("remote_upload_enabled"):
+        return None
+    server_url = config.get("remote_upload_url")
+    if not server_url:
+        print("\n  [WARN] Remote upload enabled but no URL is configured.")
+        return None
+
+    try:
+        from remote_upload import upload_recording
+
+        print(f"\n  Uploading recording to {server_url}...")
+        result = upload_recording(
+            filepath,
+            server_url,
+            remote_dir=config.get("remote_upload_path") or "audio-inbox",
+        )
+        print(f"  Uploaded to beelink: {result['remote_path']}")
+        return result
+    except Exception as exc:
+        print(f"\n  [WARN] Remote upload failed: {exc}")
+        return None
 
 
 def get_loopback_device(p: pyaudio.PyAudio, device_index=None):
@@ -1721,6 +1749,18 @@ def main():
         help="Proceed even if the mic and playback device share hardware (Bluetooth/USB headset). "
              "Warning: this typically kills playback by forcing the headset into call mode.",
     )
+    parser.add_argument(
+        "--upload-url",
+        type=str,
+        default=None,
+        help="Upload the finalized recording to an exposer server, e.g. http://beelink:8080",
+    )
+    parser.add_argument(
+        "--upload-path",
+        type=str,
+        default=None,
+        help="Remote folder under exposer's SHARE_ROOT (default: audio-inbox)",
+    )
 
     args = parser.parse_args()
 
@@ -1746,6 +1786,11 @@ def main():
             config["mic_device_index"] = args.mic_device
         if args.mic_volume is not None:
             config["mic_volume"] = max(0.0, min(2.0, args.mic_volume))
+        if args.upload_url:
+            config["remote_upload_enabled"] = True
+            config["remote_upload_url"] = args.upload_url
+        if args.upload_path:
+            config["remote_upload_path"] = args.upload_path
         recorder = SystemAudioRecorder(config)
 
         def on_sigint(sig, frame):
@@ -1782,6 +1827,7 @@ def main():
                     )
                 time.sleep(0.3)
             filepath = recorder.stop()
+            maybe_upload_recording(filepath, config)
             if filepath and config.get("auto_transcribe"):
                 model = args.model or config.get("whisper_model", "base")
                 transcribe_file(filepath, model)

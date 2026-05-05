@@ -139,6 +139,34 @@ python batch_transcribe.py --model medium
 
 ---
 
+## Remote capture, beelink processing
+
+Use this when audio must be captured on another Windows machine, but
+transcription/diarization should run on beelink.
+
+1. On beelink, run `exposer` with an upload hook:
+
+```powershell
+$env:SHARE_ROOT="C:\Users\Alan Beelink\MeetingInbox"
+$env:UPLOAD_HOOK='python "C:\Users\Alan Beelink\dev\audio-capturer\capture.py" --transcribe "%UPLOADED_FILE_PATH%" --model base'
+npm start
+```
+
+2. On the remote machine, record and upload the finalized WAV:
+
+```powershell
+python capture.py --record 60 --upload-url http://beelink:8080 --upload-path audio-inbox
+```
+
+The web UI also has this under **Settings -> Remote Processing**. Uploaded
+recordings are stored as:
+
+```
+<SHARE_ROOT>/audio-inbox/<remote-host>/<recording>/<recording>.wav
+```
+
+---
+
 ## Output layout
 
 Each recording lives in its own subfolder for tidiness:

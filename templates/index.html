@@ -761,6 +761,25 @@
 
   <div class="card">
     <h3>Controls</h3>
+    <div class="setting-group">
+      <div class="toggle-row">
+        <label style="margin:0">Upload to beelink after stop</label>
+        <label class="toggle">
+          <input type="checkbox" id="rec-remote-upload">
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+    <div class="form-row">
+      <div>
+        <label for="rec-remote-url">Upload URL</label>
+        <input type="text" id="rec-remote-url" placeholder="http://beelink:8080">
+      </div>
+      <div>
+        <label for="rec-remote-path">Remote Folder</label>
+        <input type="text" id="rec-remote-path" placeholder="audio-inbox">
+      </div>
+    </div>
     <div style="display:flex; gap:12px; margin-bottom:12px;">
       <button id="btn-start" class="btn btn-primary" onclick="startRecording()">Start Recording</button>
       <button id="btn-stop" class="btn btn-danger" onclick="stopRecording()" disabled>Stop Recording</button>
@@ -862,6 +881,27 @@
     <div class="setting-group">
       <label for="set-output-dir">Recordings Directory</label>
       <input type="text" id="set-output-dir" placeholder="~/MeetingRecordings">
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Remote Processing</h3>
+    <div class="setting-group">
+      <div class="toggle-row">
+        <label style="margin:0">Send recordings to beelink</label>
+        <label class="toggle">
+          <input type="checkbox" id="set-remote-upload">
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+    <div class="setting-group">
+      <label for="set-remote-url">Exposer URL</label>
+      <input type="text" id="set-remote-url" placeholder="http://beelink:8080">
+    </div>
+    <div class="setting-group">
+      <label for="set-remote-path">Remote Folder</label>
+      <input type="text" id="set-remote-path" placeholder="audio-inbox">
     </div>
   </div>
 
@@ -1196,9 +1236,15 @@ async function startRecording() {
 
   const dur = document.getElementById('rec-duration').value;
   const recName = document.getElementById('rec-name').value.trim();
+  const uploadEnabled = document.getElementById('rec-remote-upload').checked;
+  const uploadUrl = document.getElementById('rec-remote-url').value.trim();
+  const uploadPath = document.getElementById('rec-remote-path').value.trim();
   const body = {};
   if (dur) body.max_duration_minutes = parseInt(dur);
   if (recName) body.name = recName;
+  body.remote_upload_enabled = uploadEnabled;
+  body.remote_upload_url = uploadUrl || null;
+  body.remote_upload_path = uploadPath || 'audio-inbox';
 
   await _startRecordingRequest(body);
 }
@@ -1805,6 +1851,9 @@ async function loadSettings() {
   if (!data) return;
   const s = data.settings;
   document.getElementById('set-output-dir').value = s.output_dir || '';
+  document.getElementById('set-remote-upload').checked = !!s.remote_upload_enabled;
+  document.getElementById('set-remote-url').value = s.remote_upload_url || '';
+  document.getElementById('set-remote-path').value = s.remote_upload_path || 'audio-inbox';
   document.getElementById('set-model').value = s.whisper_model || 'base';
   document.getElementById('set-language').value = s.language || '';
   document.getElementById('set-auto-transcribe').checked = !!s.auto_transcribe;
@@ -1880,12 +1929,24 @@ async function loadSettings() {
   }
 }
 
+async function loadRecordUploadSettings() {
+  const data = await apiCall('/api/settings');
+  if (!data) return;
+  const s = data.settings;
+  document.getElementById('rec-remote-upload').checked = !!s.remote_upload_enabled;
+  document.getElementById('rec-remote-url').value = s.remote_upload_url || '';
+  document.getElementById('rec-remote-path').value = s.remote_upload_path || 'audio-inbox';
+}
+
 async function saveSettings() {
   const devVal = document.getElementById('set-device').value;
   const maxSpeakers = document.getElementById('set-max-speakers').value;
   const micDevVal = document.getElementById('set-mic-device').value;
   const body = {
     output_dir: document.getElementById('set-output-dir').value,
+    remote_upload_enabled: document.getElementById('set-remote-upload').checked,
+    remote_upload_url: document.getElementById('set-remote-url').value || null,
+    remote_upload_path: document.getElementById('set-remote-path').value || 'audio-inbox',
     whisper_model: document.getElementById('set-model').value,
     language: document.getElementById('set-language').value || null,
     auto_transcribe: document.getElementById('set-auto-transcribe').checked,
@@ -2537,6 +2598,7 @@ function showTestResults(speakers) {
 // ─── Init ─────────────────────────────────────────────────────────────────
 async function init() {
   loadDevices();
+  loadRecordUploadSettings();
   // Check if already recording
   const data = await apiCall('/api/recording/status');
   if (data && data.recording) {

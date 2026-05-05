@@ -41,6 +41,7 @@ from capture import (
     resolve_wav,
     save_config,
     trim_wav_to_temp,
+    maybe_upload_recording,
 )
 
 try:
@@ -54,6 +55,7 @@ app = Flask(__name__)
 
 _recorder = None
 _recorder_lock = threading.Lock()
+_recording_upload_override = None
 
 _transcription = {
     "active": False,
@@ -232,6 +234,8 @@ def index():
 
 @app.route("/api/recording/start", methods=["POST"])
 def recording_start():
+    global _recording_upload_override
+
     # Stop any active preview before recording
     _stop_audio_preview()
 
@@ -243,6 +247,14 @@ def recording_start():
     max_dur = data.get("max_duration_minutes")
     name = data.get("name")
     allow_mic_conflict = bool(data.get("allow_mic_conflict", False))
+    upload_keys = {"remote_upload_enabled", "remote_upload_url", "remote_upload_path"}
+    _recording_upload_override = None
+    if any(key in data for key in upload_keys):
+        _recording_upload_override = {
+            "remote_upload_enabled": bool(data.get("remote_upload_enabled", False)),
+            "remote_upload_url": data.get("remote_upload_url"),
+            "remote_upload_path": data.get("remote_upload_path") or "audio-inbox",
+        }
 
     ok = recorder.start(
         max_duration_minutes=max_dur,
@@ -250,6 +262,7 @@ def recording_start():
         allow_mic_conflict=allow_mic_conflict,
     )
     if not ok:
+        _recording_upload_override = None
         err = recorder.last_error or {}
         payload = {
             "ok": False,
@@ -275,6 +288,8 @@ def recording_start():
 
 @app.route("/api/recording/stop", methods=["POST"])
 def recording_stop():
+    global _recording_upload_override
+
     with _recorder_lock:
         if _recorder is None:
             return jsonify({"ok": False, "error": "Not recording"}), 409
@@ -287,9 +302,19 @@ def recording_stop():
 
     # Auto-transcribe if enabled
     config = load_config()
+    if _recording_upload_override is not None:
+        config.update(_recording_upload_override)
+        _recording_upload_override = None
     if filepath and config.get("auto_transcribe"):
         _start_transcription(filepath.name, config.get("whisper_model", "base"))
         result["auto_transcribe_started"] = True
+
+    if filepath and config.get("remote_upload_enabled"):
+        def _upload_worker(path, upload_config):
+            maybe_upload_recording(path, upload_config)
+
+        threading.Thread(target=_upload_worker, args=(filepath, config.copy()), daemon=True).start()
+        result["remote_upload_started"] = True
 
     return jsonify(result)
 
@@ -971,6 +996,7 @@ def update_settings():
         "diarization_enabled", "hf_token", "diarization_max_speakers",
         "vocabulary_terms", "hotwords", "language",
         "mic_enabled", "mic_device_index", "mic_volume",
+        "remote_upload_enabled", "remote_upload_url", "remote_upload_path",
     }
     for key in allowed_keys:
         if key in data:
