@@ -791,6 +791,15 @@
         <span class="elapsed" id="rec-elapsed">00:00:00</span>
         <span id="rec-file" style="font-size:12px;"></span>
       </div>
+      <div id="rec-mic-stalled-banner"
+           style="display:none; margin:8px 0; padding:8px 10px; border-radius:6px;
+                  background:#fff4e5; color:#7a4b00; border:1px solid #f5c787;
+                  font-size:12px;">
+        ⚠ Microphone stalled — recording system audio only. The mic device
+        stopped delivering data (Bluetooth profile flip, exclusive grab by
+        another app, or driver glitch). Stop and re-start the recording to
+        retry, or pick a different mic in Settings.
+      </div>
       <!-- Single level bar (loopback only) -->
       <div id="rec-single-level">
         <div class="level-bar-container">
@@ -1325,6 +1334,8 @@ async function pollStatus() {
   }
   document.getElementById('rec-elapsed').textContent = data.elapsed;
   document.getElementById('rec-file').textContent = data.file;
+  document.getElementById('rec-mic-stalled-banner').style.display =
+    data.mic_stalled ? 'block' : 'none';
 
   if (data.mic_enabled) {
     // Dual level bars mode

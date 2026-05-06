@@ -341,6 +341,10 @@ class SystemAudioRecorder:
         self.current_rms_mic = 0.0
         self.mic_sample_rate = None
         self.mic_channels = None
+        # Set by the mixer thread when the mic callback stalls and we fall back
+        # to loopback-only writes. Exposed through get_status() so the UI can
+        # warn the user mid-recording instead of producing a 0 MB file.
+        self.mic_stalled = False
 
         # Structured error from the last failed start() — consumed by the web API
         # to surface actionable messages (e.g. Bluetooth headset conflict).
@@ -533,6 +537,7 @@ class SystemAudioRecorder:
         self.start_time = time.time()
         self.peak_rms = 0.0
         self.current_rms_mic = 0.0
+        self.mic_stalled = False
         self._loopback_callback_seen = False
         self._mic_callback_seen = False
 
@@ -615,7 +620,7 @@ class SystemAudioRecorder:
         return (None, pyaudio.paContinue)
 
     def _mixer_loop(self):
-        """Mixer thread, mic-driven.
+        """Mixer thread, mic-driven with loopback-only fallback.
 
         Mic is the time reference because WASAPI loopback only delivers callbacks
         while the OS audio engine is actively rendering — during silence (no app
@@ -623,7 +628,19 @@ class SystemAudioRecorder:
         loopback as the clock, mic data would be discarded during those gaps.
         Mic-driven means: every mic chunk → write a chunk to disk, mixing in
         whatever loopback we have buffered (and silence if we have none).
+
+        Fallback: if the mic callback never delivers a single chunk within
+        ``MIC_STALL_THRESHOLD`` (~3 s), we assume the mic is dead (Bluetooth
+        profile flip, exclusive grab by Teams/Zoom, driver glitch) and switch to
+        a loopback-only writer for the rest of the recording. Without this
+        fallback, a stalled mic produces a 0 MB file even though loopback was
+        capturing the meeting fine.
         """
+        # Number of empty 100 ms iterations before we give up on the mic and
+        # switch to loopback-only. 30 ≈ 3 s — long enough that a brief device
+        # hiccup doesn't trip it, short enough the user notices early.
+        MIC_STALL_THRESHOLD = 30
+
         print(f"[MIXER] thread started (lb={self.sample_rate}Hz/{self.channels}ch  "
               f"mic={self.mic_sample_rate}Hz/{self.mic_channels}ch)  mic-driven")
         lb_buffer = bytearray()
@@ -633,17 +650,56 @@ class SystemAudioRecorder:
         empty_mic_iters = 0
         chunks_with_lb = 0
         chunks_silent = 0
+        chunks_loopback_only = 0
+        fallback_mode = False
+        fallback_empty_lb_warned = False
 
         try:
             while not self._mixer_stop.is_set():
-                # Get next mic chunk (mic always fires steady callbacks)
+                if fallback_mode:
+                    # Loopback-only mode: no mic, just drain loopback to disk.
+                    try:
+                        lb_chunk = self._loopback_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        # If loopback is also silent for a long time, surface it.
+                        if (not fallback_empty_lb_warned
+                                and chunks_loopback_only == 0):
+                            # Only warn once, after ~5 s of nothing in fallback.
+                            empty_mic_iters += 1
+                            if empty_mic_iters >= MIC_STALL_THRESHOLD + 50:
+                                print("[MIXER] WARNING: in loopback-only fallback "
+                                      "but loopback queue is also empty — nothing is "
+                                      "being captured. Is anything playing audio?")
+                                fallback_empty_lb_warned = True
+                        continue
+                    with self._lock:
+                        if self.wav_file:
+                            self.wav_file.writeframes(lb_chunk)
+                            self.frames_written += len(lb_chunk) // bytes_per_lb_frame
+                            chunks_loopback_only += 1
+                            if not first_write_logged:
+                                print(f"[MIXER] first frame written ({len(lb_chunk) // bytes_per_lb_frame} frames, fallback)")
+                                first_write_logged = True
+                    continue
+
+                # Mic-driven mode: get next mic chunk
                 try:
                     mic_data = self._mic_queue.get(timeout=0.1)
                 except queue.Empty:
                     empty_mic_iters += 1
-                    if empty_mic_iters in (10, 50, 100):
+                    if empty_mic_iters in (10, 20):
                         print(f"[MIXER] WARNING: no mic data after ~{empty_mic_iters/10:.0f}s — "
                               f"mic callback may not be firing.")
+                    if empty_mic_iters >= MIC_STALL_THRESHOLD:
+                        # Mic is dead — fall back to loopback-only so we don't
+                        # produce a 0 MB file. The user loses mic audio but
+                        # keeps the system audio of the meeting.
+                        print(f"[MIXER] Mic stalled after ~{empty_mic_iters/10:.0f}s — "
+                              f"switching to LOOPBACK-ONLY fallback (recording will "
+                              f"contain system audio only).")
+                        self.mic_stalled = True
+                        fallback_mode = True
+                        empty_mic_iters = 0  # reuse counter for fallback warning
                     continue
                 empty_mic_iters = 0
 
@@ -725,7 +781,8 @@ class SystemAudioRecorder:
             return
 
         print(f"[MIXER] thread exiting (frames_written={self.frames_written}, "
-              f"chunks_with_loopback={chunks_with_lb}, chunks_silent={chunks_silent})")
+              f"chunks_with_loopback={chunks_with_lb}, chunks_silent={chunks_silent}, "
+              f"chunks_loopback_only={chunks_loopback_only}, fallback={fallback_mode})")
 
     def _abort_start_cleanup(self):
         """Undo partial state from a failed start() call.
@@ -812,6 +869,7 @@ class SystemAudioRecorder:
             "file": str(self.filepath),
             "mic_enabled": self.mic_enabled and self.mic_stream is not None,
             "rms_mic": self.current_rms_mic,
+            "mic_stalled": bool(self.mic_stalled),
         }
 
     def cleanup(self):
