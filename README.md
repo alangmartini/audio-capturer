@@ -20,6 +20,7 @@ Everything runs locally. No cloud calls, no virtual audio drivers, no admin righ
 - **Local transcription** with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2, ~4× faster than `openai-whisper` on CPU)
 - **Speaker diarization** with [pyannote.audio](https://github.com/pyannote/pyannote-audio) (optional)
 - **Speaker enrollment** — name your colleagues once, get labeled transcripts forever
+- **Timestamped references** - add links or capture desktop screenshots while recording, then jump back to that moment during playback
 - **Two interfaces**: terminal CLI (`capture.py`) and web UI (`app.py`)
 - **Batch processor** with watch mode (`batch_transcribe.py`)
 - Outputs `.wav`, `.txt`, `.srt`, `.json` per recording, organized into per-recording subfolders
@@ -64,7 +65,7 @@ Launches an interactive menu:
 | `o` | Open recordings folder |
 | `q` | Quit |
 
-While recording, press `s` to stop, `q` to abort.
+While recording, press `l` to add a link, `p` to capture a full-desktop screenshot, `s` to stop, or `q` to abort.
 
 ### Web UI
 
@@ -74,7 +75,7 @@ python app.py --port 8080     # custom port
 python app.py --host 0.0.0.0  # expose on LAN (use with care)
 ```
 
-The web UI mirrors the CLI: record, browse recordings (with subfolders), transcribe (full or segment), diarize, enroll/identify speakers, rename, delete, download, and live device-level previews.
+The web UI mirrors the CLI: record, add timestamped links/screenshots, browse recordings (with subfolders), jump from annotations to audio timestamps, transcribe (full or segment), diarize, enroll/identify speakers, rename, delete, download, and preview live device levels.
 
 ---
 
@@ -178,6 +179,9 @@ Each recording lives in its own subfolder for tidiness:
     recording_2026-05-02_10-15-00.txt   # plain text (with timestamps if diarized)
     recording_2026-05-02_10-15-00.srt   # subtitles
     recording_2026-05-02_10-15-00.json  # structured segments + language (batch only)
+    recording_annotations.json           # timestamped link/screenshot metadata
+    screenshots/
+      screenshot_00-12-34_ab12cd34.png   # full desktop captured at 00:12:34
 ```
 
 ---

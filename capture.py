@@ -27,8 +27,10 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 import wave
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -48,6 +50,8 @@ DEFAULT_OUTPUT_DIR = Path.home() / "MeetingRecordings"
 CHUNK_SIZE = 1024
 SILENCE_THRESHOLD = 0.001  # RMS threshold for silence detection
 CONFIG_FILE = Path.home() / ".audio_capture_config.json"
+ANNOTATIONS_FILE = "recording_annotations.json"
+_annotations_lock = threading.Lock()
 
 
 def resolve_wav(out_dir, filename):
@@ -61,6 +65,133 @@ def resolve_wav(out_dir, filename):
     if subfolder_path.exists():
         return subfolder_path
     return Path(out_dir) / filename
+
+
+def get_annotations_path(filepath):
+    """Return a collision-free annotation sidecar path for folder and legacy layouts."""
+    filepath = Path(filepath)
+    if filepath.parent.name == filepath.stem:
+        return filepath.parent / ANNOTATIONS_FILE
+    return filepath.with_name(f"{filepath.stem}.annotations.json")
+
+
+def get_screenshots_dir(filepath):
+    """Return the screenshot directory associated with a recording."""
+    filepath = Path(filepath)
+    if filepath.parent.name == filepath.stem:
+        return filepath.parent / "screenshots"
+    return filepath.parent / f"{filepath.stem}_screenshots"
+
+
+def load_recording_annotations(filepath):
+    """Load timestamped links and screenshots associated with a recording."""
+    filepath = Path(filepath)
+    annotations_path = get_annotations_path(filepath)
+    if not annotations_path.exists():
+        return {"version": 1, "recording": filepath.name, "annotations": []}
+    try:
+        data = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if not isinstance(data.get("annotations"), list):
+            raise ValueError("annotations must be a list")
+        return data
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {"version": 1, "recording": filepath.name, "annotations": []}
+
+
+def _save_recording_annotation(filepath, annotation):
+    """Append one annotation using an atomic sidecar-file update."""
+    filepath = Path(filepath)
+    annotations_path = get_annotations_path(filepath)
+    with _annotations_lock:
+        data = load_recording_annotations(filepath)
+        data["recording"] = filepath.name
+        data["annotations"].append(annotation)
+        data["annotations"].sort(key=lambda item: item.get("timestamp", 0))
+        temp_path = annotations_path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_path.replace(annotations_path)
+    return annotation
+
+
+def refresh_recording_annotations(filepath, previous_screenshots_dir=None):
+    """Refresh sidecar paths after a recording is renamed or moved."""
+    filepath = Path(filepath)
+    annotations_path = get_annotations_path(filepath)
+    if not annotations_path.exists():
+        return
+    with _annotations_lock:
+        try:
+            data = json.loads(annotations_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return
+        data["recording"] = filepath.name
+        if previous_screenshots_dir:
+            for annotation in data.get("annotations", []):
+                image_file = annotation.get("file")
+                if annotation.get("type") != "screenshot" or not image_file:
+                    continue
+                parts = Path(image_file).parts
+                if parts and parts[0] == previous_screenshots_dir:
+                    annotation["file"] = Path("screenshots", *parts[1:]).as_posix()
+        temp_path = annotations_path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_path.replace(annotations_path)
+
+
+def add_link_annotation(filepath, timestamp, url, title=None):
+    """Associate a URL with a recording timestamp."""
+    url = (url or "").strip()
+    if url and "://" not in url:
+        url = f"https://{url}"
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("Link must be a valid http:// or https:// URL")
+    annotation = {
+        "id": uuid.uuid4().hex,
+        "type": "link",
+        "timestamp": round(max(0.0, float(timestamp)), 3),
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "url": url,
+        "title": (title or "").strip() or url,
+    }
+    return _save_recording_annotation(filepath, annotation)
+
+
+def add_screenshot_annotation(filepath, timestamp):
+    """Capture the Windows desktop and associate the image with a timestamp."""
+    try:
+        from PIL import ImageGrab
+    except ImportError as exc:
+        raise RuntimeError("Screenshot capture requires Pillow: pip install Pillow") from exc
+
+    filepath = Path(filepath)
+    annotation_id = uuid.uuid4().hex
+    seconds = max(0.0, float(timestamp))
+    stamp = format_duration(seconds).replace(":", "-")
+    screenshots_dir = get_screenshots_dir(filepath)
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    image_path = screenshots_dir / f"screenshot_{stamp}_{annotation_id[:8]}.png"
+
+    try:
+        image = ImageGrab.grab(all_screens=True)
+        image.save(image_path, "PNG")
+    except Exception:
+        if image_path.exists():
+            image_path.unlink()
+        raise
+
+    annotation = {
+        "id": annotation_id,
+        "type": "screenshot",
+        "timestamp": round(seconds, 3),
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "file": image_path.relative_to(filepath.parent).as_posix(),
+    }
+    try:
+        return _save_recording_annotation(filepath, annotation)
+    except Exception:
+        image_path.unlink(missing_ok=True)
+        raise
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -872,6 +1003,18 @@ class SystemAudioRecorder:
             "mic_stalled": bool(self.mic_stalled),
         }
 
+    def get_elapsed_seconds(self):
+        """Return the current recording position for timestamped annotations."""
+        if not self.is_recording or self.start_time is None:
+            raise RuntimeError("Not recording")
+        return max(0.0, time.time() - self.start_time)
+
+    def add_link(self, url, title=None):
+        return add_link_annotation(self.filepath, self.get_elapsed_seconds(), url, title)
+
+    def add_screenshot(self):
+        return add_screenshot_annotation(self.filepath, self.get_elapsed_seconds())
+
     def cleanup(self):
         """Release PyAudio resources."""
         if self.is_recording:
@@ -1439,12 +1582,21 @@ def rename_recording(filepath, new_name):
                 new_file = new_folder / f"{safe}{ext}"
                 old_file.rename(new_file)
                 renamed.append((old_file.name, new_file.name))
+        annotations_path = get_annotations_path(filepath)
+        if annotations_path.exists():
+            annotations_path.rename(new_folder / ANNOTATIONS_FILE)
+        screenshots_dir = get_screenshots_dir(filepath)
+        if screenshots_dir.exists():
+            screenshots_dir.rename(new_folder / "screenshots")
 
     if renamed:
         print(f"  Renamed {len(renamed)} file(s):")
         for old_n, new_n in renamed:
             print(f"    {old_n} -> {new_n}")
-    return new_folder / f"{safe}.wav"
+    new_filepath = new_folder / f"{safe}.wav"
+    previous_screenshots_dir = f"{old_stem}_screenshots" if not is_subfolder else None
+    refresh_recording_annotations(new_filepath, previous_screenshots_dir)
+    return new_filepath
 
 
 # ─── Interactive CLI ──────────────────────────────────────────────────────────
@@ -1510,6 +1662,23 @@ def interactive_mode():
                     recorder.cleanup()
                     print("\n  Goodbye!\n")
                     return
+                elif key == "l":
+                    print("\n")
+                    url = input("  Link URL: ").strip()
+                    if url:
+                        title = input("  Link title (Enter to use URL): ").strip() or None
+                        try:
+                            annotation = recorder.add_link(url, title)
+                            print(f"  Link added at {format_duration(annotation['timestamp'])}.\n")
+                        except Exception as exc:
+                            print(f"  [ERROR] Could not add link: {exc}\n")
+                elif key == "p":
+                    print("\n  Capturing screenshot...")
+                    try:
+                        annotation = recorder.add_screenshot()
+                        print(f"  Screenshot added at {format_duration(annotation['timestamp'])}.\n")
+                    except Exception as exc:
+                        print(f"  [ERROR] Could not capture screenshot: {exc}\n")
         else:
             print("\n  Commands:")
             print("    [r] Start recording")
@@ -1531,7 +1700,7 @@ def interactive_mode():
                 dur = input("  Max duration in minutes (Enter for unlimited): ").strip()
                 dur = int(dur) if dur.isdigit() else None
                 if recorder.start(max_duration_minutes=dur, name=rec_name):
-                    print("\n  Recording! Press [s] to stop, [q] to quit.\n")
+                    print("\n  Recording! [l] add link, [p] screenshot, [s] stop, [q] quit.\n")
                 else:
                     print("  [ERROR] Could not start recording.\n")
 

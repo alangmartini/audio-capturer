@@ -34,10 +34,15 @@ load_dotenv()
 from flask import Flask, jsonify, render_template, request, send_file
 
 from capture import (
+    ANNOTATIONS_FILE,
     SystemAudioRecorder,
     format_srt_time,
+    get_annotations_path,
+    get_screenshots_dir,
     get_wav_duration,
+    load_recording_annotations,
     load_config,
+    refresh_recording_annotations,
     resolve_wav,
     save_config,
     trim_wav_to_temp,
@@ -328,6 +333,45 @@ def recording_status():
     return jsonify(status)
 
 
+def _require_active_recorder():
+    with _recorder_lock:
+        recorder = _recorder
+    if recorder is None or not recorder.is_recording:
+        return None
+    return recorder
+
+
+@app.route("/api/recording/annotations")
+def active_recording_annotations():
+    recorder = _require_active_recorder()
+    if recorder is None:
+        return jsonify({"ok": False, "error": "Not recording"}), 409
+    data = load_recording_annotations(recorder.filepath)
+    return jsonify({"ok": True, "annotations": data["annotations"]})
+
+
+@app.route("/api/recording/annotations/link", methods=["POST"])
+def add_active_link():
+    recorder = _require_active_recorder()
+    if recorder is None:
+        return jsonify({"ok": False, "error": "Not recording"}), 409
+    data = request.get_json(silent=True) or {}
+    try:
+        annotation = recorder.add_link(data.get("url"), data.get("title"))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "annotation": annotation})
+
+
+@app.route("/api/recording/annotations/screenshot", methods=["POST"])
+def add_active_screenshot():
+    recorder = _require_active_recorder()
+    if recorder is None:
+        return jsonify({"ok": False, "error": "Not recording"}), 409
+    annotation = recorder.add_screenshot()
+    return jsonify({"ok": True, "annotation": annotation})
+
+
 # ─── Recordings list ─────────────────────────────────────────────────────────
 
 @app.route("/api/recordings")
@@ -344,6 +388,7 @@ def list_recordings():
             "size_mb": round(stat.st_size / (1024 * 1024), 1),
             "modified": stat.st_mtime,
             "transcripts": {},
+            "annotations": load_recording_annotations(wav)["annotations"],
         }
         for ext in (".txt", ".srt", ".json"):
             t = wav.with_suffix(ext)
@@ -362,6 +407,38 @@ def list_recordings():
         recordings.append(entry)
 
     return jsonify({"recordings": recordings})
+
+
+@app.route("/api/recordings/<name>/annotations")
+def get_recording_annotations(name):
+    out_dir = _get_output_dir()
+    wav_path = resolve_wav(out_dir, name)
+    if not wav_path.exists():
+        return jsonify({"ok": False, "error": f"Recording not found: {name}"}), 404
+    data = load_recording_annotations(wav_path)
+    return jsonify({"ok": True, "annotations": data["annotations"]})
+
+
+@app.route("/api/recordings/<name>/annotations/<annotation_id>/image")
+def get_annotation_image(name, annotation_id):
+    out_dir = _get_output_dir()
+    wav_path = resolve_wav(out_dir, name)
+    if not wav_path.exists():
+        return jsonify({"ok": False, "error": f"Recording not found: {name}"}), 404
+
+    data = load_recording_annotations(wav_path)
+    annotation = next(
+        (item for item in data["annotations"]
+         if item.get("id") == annotation_id and item.get("type") == "screenshot"),
+        None,
+    )
+    if annotation is None:
+        return jsonify({"ok": False, "error": "Screenshot not found"}), 404
+
+    image_path = (wav_path.parent / annotation.get("file", "")).resolve()
+    if not image_path.is_relative_to(wav_path.parent.resolve()) or not image_path.is_file():
+        return jsonify({"ok": False, "error": "Screenshot file not found"}), 404
+    return send_file(str(image_path), mimetype="image/png")
 
 
 @app.route("/api/recordings/open-folder", methods=["POST"])
@@ -463,6 +540,19 @@ def delete_recording(name):
             p.unlink()
             deleted.append(p.name)
 
+    annotations_path = get_annotations_path(wav_path)
+    if annotations_path.exists():
+        annotations_path.unlink()
+        deleted.append(annotations_path.name)
+    screenshots_dir = get_screenshots_dir(wav_path)
+    if screenshots_dir.exists():
+        for image_path in screenshots_dir.iterdir():
+            if image_path.is_file():
+                image_path.unlink()
+                deleted.append(image_path.name)
+        if not any(screenshots_dir.iterdir()):
+            screenshots_dir.rmdir()
+
     if not deleted:
         return jsonify({"ok": False, "error": "No files found to delete"}), 404
 
@@ -521,7 +611,16 @@ def rename_recording(name):
                 new_file = new_folder / f"{safe}{ext}"
                 old_file.rename(new_file)
                 renamed.append({"old": old_file.name, "new": new_file.name})
+        annotations_path = get_annotations_path(wav_path)
+        if annotations_path.exists():
+            annotations_path.rename(new_folder / ANNOTATIONS_FILE)
+        screenshots_dir = get_screenshots_dir(wav_path)
+        if screenshots_dir.exists():
+            screenshots_dir.rename(new_folder / "screenshots")
 
+    new_wav_path = new_folder / f"{safe}.wav"
+    previous_screenshots_dir = f"{old_stem}_screenshots" if not is_subfolder else None
+    refresh_recording_annotations(new_wav_path, previous_screenshots_dir)
     return jsonify({"ok": True, "renamed": renamed, "new_name": f"{safe}.wav"})
 
 
@@ -1635,10 +1734,16 @@ if __name__ == "__main__":
     _parser = _ap.ArgumentParser(description="Audio Capturer Web UI")
     _parser.add_argument("--port", type=int, default=5000, help="Port to run on (default: 5000)")
     _parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+    _parser.add_argument(
+        "--no-reload",
+        action="store_true",
+        help="Disable the debug reloader/debugger (for unattended/background startup)",
+    )
     _args = _parser.parse_args()
 
     print("=" * 60)
     print(f"  Audio Capturer Web UI")
     print(f"  Open http://{_args.host}:{_args.port} in your browser")
     print("=" * 60)
-    app.run(host=_args.host, port=_args.port, debug=True, use_reloader=True)
+    _debug = not _args.no_reload
+    app.run(host=_args.host, port=_args.port, debug=_debug, use_reloader=_debug)
