@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 
 from remote_common import (
+    TERMINAL_STAGES,
     log_event,
     new_request_id,
     new_status,
@@ -128,20 +129,29 @@ class StatusWriter:
         self.doc = {}
 
     def update(self, stage, message=None, progress=None, force=False, **extra):
-        stage_changed = stage != self.last_stage
-        now = time.time()
-        self.doc = new_status(
-            self.job_id, stage, message=message, progress=progress,
-            started_at=self.started_at,
-            elapsed_seconds=round(now - self.started_at, 1),
-            **extra,
-        )
-        if force or stage_changed or (now - self.last_write) >= self.min_interval:
-            write_status_atomic(self.path, self.doc)
-            self.last_write = now
-        if stage_changed:
-            log_event("job_stage", stage=stage, message=message, progress=progress)
-            self.last_stage = stage
+        try:
+            stage_changed = stage != self.last_stage
+            now = time.time()
+            self.doc = new_status(
+                self.job_id, stage, message=message, progress=progress,
+                started_at=self.started_at,
+                elapsed_seconds=round(now - self.started_at, 1),
+                **extra,
+            )
+            if force or stage_changed or (now - self.last_write) >= self.min_interval:
+                # The client stops polling on a terminal stage, so that one has
+                # to land; intermediate progress can be dropped harmlessly.
+                write_status_atomic(
+                    self.path, self.doc, required=stage in TERMINAL_STAGES,
+                )
+                self.last_write = now
+            if stage_changed:
+                log_event("job_stage", stage=stage, message=message, progress=progress)
+                self.last_stage = stage
+        except Exception as exc:
+            # Reporting progress must never take down the job it reports on.
+            log_event("status_update_failed", level="warn", stage=stage,
+                      error=f"{type(exc).__name__}: {exc}")
 
 
 def _resolve_config_overrides(args):
@@ -315,6 +325,7 @@ def main():
                     message=f"Transcription failed on the host: {detail}",
                     error=detail,
                 ),
+                required=True,
             )
         except Exception:
             pass

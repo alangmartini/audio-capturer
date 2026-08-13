@@ -102,20 +102,69 @@ def new_status(job_id, stage, message=None, progress=None, **extra):
     return doc
 
 
-def write_status_atomic(path, doc):
+def write_status_atomic(path, doc, required=False, attempts=8, retry_delay=0.05):
     """
     Write a status document so a concurrent reader never sees a torn file.
 
     The client polls this file over HTTP while the host rewrites it several
     times a second; without the temp-file + replace dance it would regularly
-    download half a JSON document.  os.replace is atomic on Windows and POSIX.
+    download half a JSON document.
+
+    Windows makes that harder than POSIX: os.replace fails with WinError 5
+    while another process holds the destination open, which is exactly what
+    exposer is doing whenever it is streaming this file to the client.  The
+    reader closes within milliseconds, so a short retry loop wins — and if it
+    somehow does not, a dropped progress update is nothing, since another
+    follows a second later.
+
+    `required=True` marks an update the client is waiting on (the terminal
+    done/error document) and simply retries far longer, since a reader holds
+    the file for milliseconds while a job runs for minutes.
+
+    It deliberately never falls back to writing in place: that truncates the
+    destination before writing, so a write that then fails would leave the
+    client parsing a destroyed status document forever.  Losing an update is
+    recoverable — the client keeps polling — whereas corrupting one is not.
+
+    Never raises.  Returns True if the document was written.  Publishing
+    progress must not be able to kill the transcription it is reporting on.
     """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(doc, f, ensure_ascii=False)
-    os.replace(tmp, path)
+    tmp = None
+    if required:
+        attempts = max(attempts, 40)  # ~30s of retries; a reader holds it for ms
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+        payload = json.dumps(doc, ensure_ascii=False, default=str)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+
+        for attempt in range(attempts):
+            try:
+                os.replace(tmp, path)
+                return True
+            except PermissionError:
+                # Reader still has it open; back off a little and try again.
+                time.sleep(min(retry_delay * (attempt + 1), 1.0))
+            except OSError:
+                break
+
+        log_event("status_write_contended", level="warn", path=str(path),
+                  required=required, attempts=attempts)
+        return False
+    except Exception as exc:
+        log_event("status_write_failed", level="warn", path=str(path),
+                  error=f"{type(exc).__name__}: {exc}")
+        return False
+    finally:
+        # A leftover temp file would otherwise accumulate in the job folder and
+        # get picked up as a stray upload.
+        try:
+            if tmp is not None and Path(tmp).exists():
+                Path(tmp).unlink()
+        except OSError:
+            pass
 
 
 # ─── Structured logging ───────────────────────────────────────────────────────
