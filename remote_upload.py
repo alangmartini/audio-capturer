@@ -125,14 +125,20 @@ class RemoteEndpoint:
         Fetch a file from the share.  Returns bytes, or None when the file is
         not there yet and `missing_ok` — the normal case while polling for a
         status document the host has not written yet.
+
+        Exposer answers a missing path with 500 and an ENOENT message from
+        Node's stat(), not 404, so "does not exist" has to be recognised from
+        the body.  Any other 500 is a real failure and still raises.
         """
-        status, body = self.request(
-            "GET", "api/download", {"path": remote_path},
-            expect=(200, 404) if missing_ok else (200,),
-        )
-        if status == 404:
+        expect = (200, 404, 500) if missing_ok else (200,)
+        status, body = self.request("GET", "api/download", {"path": remote_path}, expect=expect)
+        if status == 200:
+            return body
+
+        text = body.decode("utf-8", errors="replace")
+        if status == 404 or "ENOENT" in text or "no such file" in text.lower():
             return None
-        return body
+        raise RuntimeError(self._describe_failure(status, text))
 
     def download_json(self, remote_path, missing_ok=True):
         """Fetch and parse a JSON file, tolerating a torn read."""
