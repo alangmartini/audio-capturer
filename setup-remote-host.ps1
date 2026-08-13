@@ -25,13 +25,31 @@
   .\setup-remote-host.ps1 -InboxRoot D:\MeetingInbox -Model medium
 #>
 param(
-  [string]$InboxRoot = "$env:USERPROFILE\MeetingInbox",
+  [string]$InboxRoot,
   [string]$Model = "base",
   [switch]$NoDiarize
 )
 
 $ErrorActionPreference = "Stop"
 $repo = $PSScriptRoot
+
+# Default to whatever exposer is already sharing, rather than inventing a new
+# root: moving SHARE_ROOT relocates the entire share and orphans recordings
+# the web UI is currently pointing at.
+if (-not $InboxRoot) {
+  $existing = [Environment]::GetEnvironmentVariable("SHARE_ROOT", "User")
+  if ($existing) {
+    $InboxRoot = $existing
+  } else {
+    $exposerShared = Join-Path (Split-Path $repo -Parent) "exposer\shared"
+    if (Test-Path $exposerShared) {
+      # exposer's own default when SHARE_ROOT is unset.
+      $InboxRoot = $exposerShared
+    } else {
+      $InboxRoot = "$env:USERPROFILE\MeetingInbox"
+    }
+  }
+}
 
 Write-Host ""
 Write-Host "  Configuring this machine as the transcription host" -ForegroundColor Cyan
