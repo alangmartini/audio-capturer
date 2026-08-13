@@ -8,6 +8,7 @@ faster-whisper>=1.1.0
 # Web UI
 flask>=3.0
 python-dotenv>=1.0
+Pillow>=10.0
 
 # Speaker diarization (optional) - identifies different speakers
 # Requires a HuggingFace token: https://huggingface.co/settings/tokens

@@ -27,8 +27,10 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 import wave
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -48,6 +50,8 @@ DEFAULT_OUTPUT_DIR = Path.home() / "MeetingRecordings"
 CHUNK_SIZE = 1024
 SILENCE_THRESHOLD = 0.001  # RMS threshold for silence detection
 CONFIG_FILE = Path.home() / ".audio_capture_config.json"
+ANNOTATIONS_FILE = "recording_annotations.json"
+_annotations_lock = threading.Lock()
 
 
 def resolve_wav(out_dir, filename):
@@ -77,6 +81,133 @@ def resolve_wav(out_dir, filename):
     # Nothing found — return the flat path so callers' .exists() check fails
     # with a sensible default location in any error message.
     return flat_path
+
+
+def get_annotations_path(filepath):
+    """Return a collision-free annotation sidecar path for folder and legacy layouts."""
+    filepath = Path(filepath)
+    if filepath.parent.name == filepath.stem:
+        return filepath.parent / ANNOTATIONS_FILE
+    return filepath.with_name(f"{filepath.stem}.annotations.json")
+
+
+def get_screenshots_dir(filepath):
+    """Return the screenshot directory associated with a recording."""
+    filepath = Path(filepath)
+    if filepath.parent.name == filepath.stem:
+        return filepath.parent / "screenshots"
+    return filepath.parent / f"{filepath.stem}_screenshots"
+
+
+def load_recording_annotations(filepath):
+    """Load timestamped links and screenshots associated with a recording."""
+    filepath = Path(filepath)
+    annotations_path = get_annotations_path(filepath)
+    if not annotations_path.exists():
+        return {"version": 1, "recording": filepath.name, "annotations": []}
+    try:
+        data = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if not isinstance(data.get("annotations"), list):
+            raise ValueError("annotations must be a list")
+        return data
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {"version": 1, "recording": filepath.name, "annotations": []}
+
+
+def _save_recording_annotation(filepath, annotation):
+    """Append one annotation using an atomic sidecar-file update."""
+    filepath = Path(filepath)
+    annotations_path = get_annotations_path(filepath)
+    with _annotations_lock:
+        data = load_recording_annotations(filepath)
+        data["recording"] = filepath.name
+        data["annotations"].append(annotation)
+        data["annotations"].sort(key=lambda item: item.get("timestamp", 0))
+        temp_path = annotations_path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_path.replace(annotations_path)
+    return annotation
+
+
+def refresh_recording_annotations(filepath, previous_screenshots_dir=None):
+    """Refresh sidecar paths after a recording is renamed or moved."""
+    filepath = Path(filepath)
+    annotations_path = get_annotations_path(filepath)
+    if not annotations_path.exists():
+        return
+    with _annotations_lock:
+        try:
+            data = json.loads(annotations_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return
+        data["recording"] = filepath.name
+        if previous_screenshots_dir:
+            for annotation in data.get("annotations", []):
+                image_file = annotation.get("file")
+                if annotation.get("type") != "screenshot" or not image_file:
+                    continue
+                parts = Path(image_file).parts
+                if parts and parts[0] == previous_screenshots_dir:
+                    annotation["file"] = Path("screenshots", *parts[1:]).as_posix()
+        temp_path = annotations_path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_path.replace(annotations_path)
+
+
+def add_link_annotation(filepath, timestamp, url, title=None):
+    """Associate a URL with a recording timestamp."""
+    url = (url or "").strip()
+    if url and "://" not in url:
+        url = f"https://{url}"
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("Link must be a valid http:// or https:// URL")
+    annotation = {
+        "id": uuid.uuid4().hex,
+        "type": "link",
+        "timestamp": round(max(0.0, float(timestamp)), 3),
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "url": url,
+        "title": (title or "").strip() or url,
+    }
+    return _save_recording_annotation(filepath, annotation)
+
+
+def add_screenshot_annotation(filepath, timestamp):
+    """Capture the Windows desktop and associate the image with a timestamp."""
+    try:
+        from PIL import ImageGrab
+    except ImportError as exc:
+        raise RuntimeError("Screenshot capture requires Pillow: pip install Pillow") from exc
+
+    filepath = Path(filepath)
+    annotation_id = uuid.uuid4().hex
+    seconds = max(0.0, float(timestamp))
+    stamp = format_duration(seconds).replace(":", "-")
+    screenshots_dir = get_screenshots_dir(filepath)
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    image_path = screenshots_dir / f"screenshot_{stamp}_{annotation_id[:8]}.png"
+
+    try:
+        image = ImageGrab.grab(all_screens=True)
+        image.save(image_path, "PNG")
+    except Exception:
+        if image_path.exists():
+            image_path.unlink()
+        raise
+
+    annotation = {
+        "id": annotation_id,
+        "type": "screenshot",
+        "timestamp": round(seconds, 3),
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "file": image_path.relative_to(filepath.parent).as_posix(),
+    }
+    try:
+        return _save_recording_annotation(filepath, annotation)
+    except Exception:
+        image_path.unlink(missing_ok=True)
+        raise
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -470,6 +601,10 @@ class SystemAudioRecorder:
         self.current_rms_mic = 0.0
         self.mic_sample_rate = None
         self.mic_channels = None
+        # Set by the mixer thread when the mic callback stalls and we fall back
+        # to loopback-only writes. Exposed through get_status() so the UI can
+        # warn the user mid-recording instead of producing a 0 MB file.
+        self.mic_stalled = False
 
         # Structured error from the last failed start() — consumed by the web API
         # to surface actionable messages (e.g. Bluetooth headset conflict).
@@ -662,6 +797,7 @@ class SystemAudioRecorder:
         self.start_time = time.time()
         self.peak_rms = 0.0
         self.current_rms_mic = 0.0
+        self.mic_stalled = False
         self._loopback_callback_seen = False
         self._mic_callback_seen = False
 
@@ -744,7 +880,7 @@ class SystemAudioRecorder:
         return (None, pyaudio.paContinue)
 
     def _mixer_loop(self):
-        """Mixer thread, mic-driven.
+        """Mixer thread, mic-driven with loopback-only fallback.
 
         Mic is the time reference because WASAPI loopback only delivers callbacks
         while the OS audio engine is actively rendering — during silence (no app
@@ -752,7 +888,19 @@ class SystemAudioRecorder:
         loopback as the clock, mic data would be discarded during those gaps.
         Mic-driven means: every mic chunk → write a chunk to disk, mixing in
         whatever loopback we have buffered (and silence if we have none).
+
+        Fallback: if the mic callback never delivers a single chunk within
+        ``MIC_STALL_THRESHOLD`` (~3 s), we assume the mic is dead (Bluetooth
+        profile flip, exclusive grab by Teams/Zoom, driver glitch) and switch to
+        a loopback-only writer for the rest of the recording. Without this
+        fallback, a stalled mic produces a 0 MB file even though loopback was
+        capturing the meeting fine.
         """
+        # Number of empty 100 ms iterations before we give up on the mic and
+        # switch to loopback-only. 30 ≈ 3 s — long enough that a brief device
+        # hiccup doesn't trip it, short enough the user notices early.
+        MIC_STALL_THRESHOLD = 30
+
         print(f"[MIXER] thread started (lb={self.sample_rate}Hz/{self.channels}ch  "
               f"mic={self.mic_sample_rate}Hz/{self.mic_channels}ch)  mic-driven")
         lb_buffer = bytearray()
@@ -762,17 +910,56 @@ class SystemAudioRecorder:
         empty_mic_iters = 0
         chunks_with_lb = 0
         chunks_silent = 0
+        chunks_loopback_only = 0
+        fallback_mode = False
+        fallback_empty_lb_warned = False
 
         try:
             while not self._mixer_stop.is_set():
-                # Get next mic chunk (mic always fires steady callbacks)
+                if fallback_mode:
+                    # Loopback-only mode: no mic, just drain loopback to disk.
+                    try:
+                        lb_chunk = self._loopback_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        # If loopback is also silent for a long time, surface it.
+                        if (not fallback_empty_lb_warned
+                                and chunks_loopback_only == 0):
+                            # Only warn once, after ~5 s of nothing in fallback.
+                            empty_mic_iters += 1
+                            if empty_mic_iters >= MIC_STALL_THRESHOLD + 50:
+                                print("[MIXER] WARNING: in loopback-only fallback "
+                                      "but loopback queue is also empty — nothing is "
+                                      "being captured. Is anything playing audio?")
+                                fallback_empty_lb_warned = True
+                        continue
+                    with self._lock:
+                        if self.wav_file:
+                            self.wav_file.writeframes(lb_chunk)
+                            self.frames_written += len(lb_chunk) // bytes_per_lb_frame
+                            chunks_loopback_only += 1
+                            if not first_write_logged:
+                                print(f"[MIXER] first frame written ({len(lb_chunk) // bytes_per_lb_frame} frames, fallback)")
+                                first_write_logged = True
+                    continue
+
+                # Mic-driven mode: get next mic chunk
                 try:
                     mic_data = self._mic_queue.get(timeout=0.1)
                 except queue.Empty:
                     empty_mic_iters += 1
-                    if empty_mic_iters in (10, 50, 100):
+                    if empty_mic_iters in (10, 20):
                         print(f"[MIXER] WARNING: no mic data after ~{empty_mic_iters/10:.0f}s — "
                               f"mic callback may not be firing.")
+                    if empty_mic_iters >= MIC_STALL_THRESHOLD:
+                        # Mic is dead — fall back to loopback-only so we don't
+                        # produce a 0 MB file. The user loses mic audio but
+                        # keeps the system audio of the meeting.
+                        print(f"[MIXER] Mic stalled after ~{empty_mic_iters/10:.0f}s — "
+                              f"switching to LOOPBACK-ONLY fallback (recording will "
+                              f"contain system audio only).")
+                        self.mic_stalled = True
+                        fallback_mode = True
+                        empty_mic_iters = 0  # reuse counter for fallback warning
                     continue
                 empty_mic_iters = 0
 
@@ -854,7 +1041,8 @@ class SystemAudioRecorder:
             return
 
         print(f"[MIXER] thread exiting (frames_written={self.frames_written}, "
-              f"chunks_with_loopback={chunks_with_lb}, chunks_silent={chunks_silent})")
+              f"chunks_with_loopback={chunks_with_lb}, chunks_silent={chunks_silent}, "
+              f"chunks_loopback_only={chunks_loopback_only}, fallback={fallback_mode})")
 
     def _abort_start_cleanup(self):
         """Undo partial state from a failed start() call.
@@ -941,7 +1129,20 @@ class SystemAudioRecorder:
             "file": str(self.filepath),
             "mic_enabled": self.mic_enabled and self.mic_stream is not None,
             "rms_mic": self.current_rms_mic,
+            "mic_stalled": bool(self.mic_stalled),
         }
+
+    def get_elapsed_seconds(self):
+        """Return the current recording position for timestamped annotations."""
+        if not self.is_recording or self.start_time is None:
+            raise RuntimeError("Not recording")
+        return max(0.0, time.time() - self.start_time)
+
+    def add_link(self, url, title=None):
+        return add_link_annotation(self.filepath, self.get_elapsed_seconds(), url, title)
+
+    def add_screenshot(self):
+        return add_screenshot_annotation(self.filepath, self.get_elapsed_seconds())
 
     def cleanup(self):
         """Release PyAudio resources."""
@@ -1566,12 +1767,21 @@ def rename_recording(filepath, new_name):
                 new_file = new_folder / f"{safe}{ext}"
                 old_file.rename(new_file)
                 renamed.append((old_file.name, new_file.name))
+        annotations_path = get_annotations_path(filepath)
+        if annotations_path.exists():
+            annotations_path.rename(new_folder / ANNOTATIONS_FILE)
+        screenshots_dir = get_screenshots_dir(filepath)
+        if screenshots_dir.exists():
+            screenshots_dir.rename(new_folder / "screenshots")
 
     if renamed:
         print(f"  Renamed {len(renamed)} file(s):")
         for old_n, new_n in renamed:
             print(f"    {old_n} -> {new_n}")
-    return new_folder / f"{safe}.wav"
+    new_filepath = new_folder / f"{safe}.wav"
+    previous_screenshots_dir = f"{old_stem}_screenshots" if not is_subfolder else None
+    refresh_recording_annotations(new_filepath, previous_screenshots_dir)
+    return new_filepath
 
 
 # ─── Interactive CLI ──────────────────────────────────────────────────────────
@@ -1637,6 +1847,23 @@ def interactive_mode():
                     recorder.cleanup()
                     print("\n  Goodbye!\n")
                     return
+                elif key == "l":
+                    print("\n")
+                    url = input("  Link URL: ").strip()
+                    if url:
+                        title = input("  Link title (Enter to use URL): ").strip() or None
+                        try:
+                            annotation = recorder.add_link(url, title)
+                            print(f"  Link added at {format_duration(annotation['timestamp'])}.\n")
+                        except Exception as exc:
+                            print(f"  [ERROR] Could not add link: {exc}\n")
+                elif key == "p":
+                    print("\n  Capturing screenshot...")
+                    try:
+                        annotation = recorder.add_screenshot()
+                        print(f"  Screenshot added at {format_duration(annotation['timestamp'])}.\n")
+                    except Exception as exc:
+                        print(f"  [ERROR] Could not capture screenshot: {exc}\n")
         else:
             print("\n  Commands:")
             print("    [r] Start recording")
@@ -1659,7 +1886,7 @@ def interactive_mode():
                 dur = input("  Max duration in minutes (Enter for unlimited): ").strip()
                 dur = int(dur) if dur.isdigit() else None
                 if recorder.start(max_duration_minutes=dur, name=rec_name):
-                    print("\n  Recording! Press [s] to stop, [q] to quit.\n")
+                    print("\n  Recording! [l] add link, [p] screenshot, [s] stop, [q] quit.\n")
                 else:
                     print("  [ERROR] Could not start recording.\n")
 

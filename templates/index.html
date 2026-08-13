@@ -241,6 +241,50 @@
   .audio-player.active { display: block; }
   .audio-player audio { width: 100%; height: 32px; }
 
+  .annotation-capture {
+    margin-top: 14px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.03);
+  }
+  .annotation-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+  .annotation-controls input { flex: 1 1 220px; }
+  .annotation-status { min-height: 18px; margin-top: 8px; font-size: 12px; color: var(--text2); }
+  .annotation-timeline { width: 100%; margin-top: 10px; display: grid; gap: 6px; }
+  .annotation-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 7px 9px;
+    border-left: 3px solid var(--accent);
+    border-radius: 5px;
+    background: var(--bg);
+    font-size: 12px;
+  }
+  .annotation-item.screenshot { border-left-color: var(--yellow); }
+  .annotation-time {
+    flex: 0 0 auto;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--accent);
+    font-family: monospace;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .annotation-time:disabled { cursor: default; color: var(--text2); }
+  .annotation-link { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .annotation-shot {
+    width: 72px;
+    height: 42px;
+    object-fit: cover;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .annotation-empty { color: var(--text2); font-size: 12px; padding: 4px 0; }
+
   .empty-state {
     text-align: center;
     padding: 48px;
@@ -791,6 +835,15 @@
         <span class="elapsed" id="rec-elapsed">00:00:00</span>
         <span id="rec-file" style="font-size:12px;"></span>
       </div>
+      <div id="rec-mic-stalled-banner"
+           style="display:none; margin:8px 0; padding:8px 10px; border-radius:6px;
+                  background:#fff4e5; color:#7a4b00; border:1px solid #f5c787;
+                  font-size:12px;">
+        ⚠ Microphone stalled — recording system audio only. The mic device
+        stopped delivering data (Bluetooth profile flip, exclusive grab by
+        another app, or driver glitch). Stop and re-start the recording to
+        retry, or pick a different mic in Settings.
+      </div>
       <!-- Single level bar (loopback only) -->
       <div id="rec-single-level">
         <div class="level-bar-container">
@@ -817,6 +870,16 @@
           </div>
           <span id="rec-rms-mic" style="width:50px; color:var(--text2);">0.0000</span>
         </div>
+      </div>
+      <div class="annotation-capture">
+        <div class="annotation-controls">
+          <input type="text" id="rec-link-url" placeholder="Paste a link related to this moment">
+          <input type="text" id="rec-link-title" placeholder="Optional title">
+          <button class="btn btn-ghost btn-sm" type="button" onclick="addRecordingLink()">Add Link</button>
+          <button class="btn btn-ghost btn-sm" id="btn-capture-screenshot" type="button" onclick="captureRecordingScreenshot()">Capture Screenshot</button>
+        </div>
+        <div class="annotation-status" id="annotation-status">Links and screenshots use the current recording timestamp.</div>
+        <div class="annotation-timeline" id="active-annotations"></div>
       </div>
     </div>
   </div>
@@ -1298,6 +1361,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
 // ─── Recording ────────────────────────────────────────────────────────────
 let statusPoll = null;
+let activeAnnotations = [];
 
 async function startRecording() {
   // Stop any active previews before recording
@@ -1336,6 +1400,8 @@ async function _startRecordingRequest(body) {
   }
 
   if (res.ok && data.ok) {
+    activeAnnotations = [];
+    renderActiveAnnotations();
     setRecordingUI(true);
     startStatusPoll();
     return;
@@ -1374,6 +1440,90 @@ function setRecordingUI(recording) {
   document.getElementById('rec-badge').classList.toggle('active', recording);
 }
 
+function annotationTime(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function escapeHtmlAttribute(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function renderAnnotations(annotations, recordingName = null) {
+  if (!annotations || annotations.length === 0) {
+    return '<div class="annotation-empty">No links or screenshots added yet.</div>';
+  }
+  return annotations.map(annotation => {
+    const time = annotationTime(annotation.timestamp);
+    const timeControl = recordingName
+      ? `<button class="annotation-time" onclick="seekToAnnotation('${escapeAttr(recordingName)}', ${Number(annotation.timestamp) || 0})" title="Play from this timestamp">${time}</button>`
+      : `<button class="annotation-time" disabled>${time}</button>`;
+    if (annotation.type === 'link') {
+      const url = escapeHtmlAttribute(annotation.url);
+      return `<div class="annotation-item">${timeControl}<span>Link</span><a class="annotation-link" href="${url}" target="_blank" rel="noopener noreferrer" title="${url}">${escapeHtml(annotation.title || annotation.url)}</a></div>`;
+    }
+    if (annotation.type === 'screenshot') {
+      if (!recordingName) {
+        return `<div class="annotation-item screenshot">${timeControl}<span>Screenshot captured</span></div>`;
+      }
+      const imageUrl = `/api/recordings/${encodeURIComponent(recordingName)}/annotations/${encodeURIComponent(annotation.id)}/image`;
+      return `<div class="annotation-item screenshot">${timeControl}<span>Screenshot</span><a href="${imageUrl}" target="_blank"><img class="annotation-shot" src="${imageUrl}" loading="lazy" alt="Screenshot at ${time}"></a></div>`;
+    }
+    return '';
+  }).join('');
+}
+
+function renderActiveAnnotations() {
+  document.getElementById('active-annotations').innerHTML = renderAnnotations(activeAnnotations);
+}
+
+async function addRecordingLink() {
+  const urlInput = document.getElementById('rec-link-url');
+  const titleInput = document.getElementById('rec-link-title');
+  let url = urlInput.value.trim();
+  if (!url) {
+    showError('Paste a link first');
+    return;
+  }
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  const data = await apiCall('/api/recording/annotations/link', {
+    method: 'POST',
+    body: JSON.stringify({ url, title: titleInput.value.trim() || null }),
+  });
+  if (!data) return;
+  activeAnnotations.push(data.annotation);
+  activeAnnotations.sort((a, b) => a.timestamp - b.timestamp);
+  renderActiveAnnotations();
+  urlInput.value = '';
+  titleInput.value = '';
+  document.getElementById('annotation-status').textContent = `Link added at ${annotationTime(data.annotation.timestamp)}.`;
+}
+
+async function captureRecordingScreenshot() {
+  const button = document.getElementById('btn-capture-screenshot');
+  const status = document.getElementById('annotation-status');
+  button.disabled = true;
+  status.textContent = 'Capturing the full desktop...';
+  const data = await apiCall('/api/recording/annotations/screenshot', { method: 'POST' });
+  button.disabled = false;
+  if (!data) {
+    status.textContent = 'Screenshot capture failed.';
+    return;
+  }
+  activeAnnotations.push(data.annotation);
+  activeAnnotations.sort((a, b) => a.timestamp - b.timestamp);
+  renderActiveAnnotations();
+  status.textContent = `Screenshot added at ${annotationTime(data.annotation.timestamp)}.`;
+}
+
 function startStatusPoll() {
   stopStatusPoll();
   statusPoll = setInterval(pollStatus, 300);
@@ -1393,6 +1543,8 @@ async function pollStatus() {
   }
   document.getElementById('rec-elapsed').textContent = data.elapsed;
   document.getElementById('rec-file').textContent = data.file;
+  document.getElementById('rec-mic-stalled-banner').style.display =
+    data.mic_stalled ? 'block' : 'none';
 
   if (data.mic_enabled) {
     // Dual level bars mode
@@ -1447,6 +1599,7 @@ async function loadRecordings() {
     const txtPath = r.transcripts.txt || '';
     const safeName = escapeAttr(r.name);
     const timingHtml = r.timing ? formatTiming(r.timing, safeName) : '';
+    const annotationsHtml = renderAnnotations(r.annotations, r.name);
     return `
       <div class="recording-item" style="flex-wrap:wrap;">
         <div class="info">
@@ -1473,6 +1626,7 @@ async function loadRecordings() {
                  onended="onAudioPause('${safeName}')">
           </audio>
         </div>
+        <div class="annotation-timeline">${annotationsHtml}</div>
       </div>
     `;
   }).join('');
@@ -1482,6 +1636,26 @@ async function loadRecordings() {
 
 function escapeAttr(s) {
   return s.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+function seekToAnnotation(name, timestamp) {
+  const wrapper = document.getElementById('player-' + name);
+  const audio = wrapper ? wrapper.querySelector('audio') : null;
+  if (!wrapper || !audio) return;
+  wrapper.classList.add('active');
+  const playFromTimestamp = () => {
+    audio.currentTime = Math.max(0, Number(timestamp) || 0);
+    audio.play();
+  };
+  if (audio.readyState === 0) {
+    audio.addEventListener('loadedmetadata', playFromTimestamp, { once: true });
+    audio.load();
+  } else {
+    playFromTimestamp();
+  }
+  const button = document.getElementById('play-btn-' + name);
+  if (button) button.textContent = 'Stop';
+  activePlayer = name;
 }
 
 function formatDuration(sec) {
