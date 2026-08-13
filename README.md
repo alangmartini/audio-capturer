@@ -194,6 +194,11 @@ pyannote both resample to that internally, so nothing they use is lost, and an
 hour of 48 kHz stereo drops from roughly 660 MB to 55 MB. That keeps uploads
 tolerable on a VPN and well inside the Worker's request-body limit.
 
+Cloudflare caps that body at 100 MB on Free and Pro plans, which works out to
+roughly **1.8 hours of audio** per job. Longer recordings are rejected before
+the upload starts, with a message saying so — split them, or send them over a
+direct `http://` LAN/Tailscale URL, which has no such cap.
+
 ### What lands where
 
 On the host, under `<SHARE_ROOT>`:

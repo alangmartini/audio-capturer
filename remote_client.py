@@ -42,6 +42,14 @@ STALL_TIMEOUT = 20 * 60
 MIN_JOB_TIMEOUT = 45 * 60
 JOB_TIMEOUT_PER_AUDIO_SECOND = 8
 
+# Cloudflare caps the request body a Worker will proxy at 100 MB on Free and
+# Pro plans (200 MB Business), and answers anything larger with a bare 413.
+# 16 kHz mono FLAC runs about 55 MB/hour, so this only bites past roughly two
+# hours of audio — but when it does, the user deserves to hear why before
+# spending the upload rather than after.
+WORKER_BODY_LIMIT = 100 * 1024 * 1024
+WORKER_BODY_MARGIN = 2 * 1024 * 1024
+
 
 class RemoteTranscribeError(RuntimeError):
     """Raised when the round trip fails; the message is user-facing."""
@@ -217,6 +225,18 @@ def remote_transcribe(
 
     try:
         check_cancelled()
+
+        # Only the Worker enforces this; a direct LAN endpoint has no such cap.
+        via_worker = server_url.lower().startswith("https://")
+        if via_worker and encoded_path.stat().st_size > (WORKER_BODY_LIMIT - WORKER_BODY_MARGIN):
+            hours = (duration or 0) / 3600
+            raise RemoteTranscribeError(
+                f"This recording is {size_mb:.0f} MB after compression"
+                f"{f' ({hours:.1f} hours of audio)' if hours else ''}, over the "
+                f"100 MB body limit Cloudflare enforces on the Worker. Split the "
+                f"recording, or transcribe it over a direct connection to the host "
+                f"(an http:// LAN or Tailscale URL) which has no such limit."
+            )
 
         # ── 2. Tell the host what to do with it ───────────────────────────
         # Uploaded first so it is already in place when the audio arrives and
