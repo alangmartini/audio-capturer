@@ -53,14 +53,30 @@ CONFIG_FILE = Path.home() / ".audio_capture_config.json"
 def resolve_wav(out_dir, filename):
     """Resolve a WAV filename to its actual path.
 
-    Checks subfolder first (out_dir/stem/filename),
-    then flat (out_dir/filename) for backward compatibility.
+    Checks subfolder first (out_dir/stem/filename), then flat
+    (out_dir/filename) for backward compatibility, then falls back to
+    a recursive search under out_dir. The recursive fallback supports
+    files placed in nested subfolders by remote uploads (e.g. an
+    exposer audio-inbox where files live under <hostname>/<stem>/).
+    If multiple matches exist, the most recently modified one wins,
+    matching the ordering used by list_recordings().
     """
+    out_dir = Path(out_dir)
     stem = Path(filename).stem
-    subfolder_path = Path(out_dir) / stem / filename
+    subfolder_path = out_dir / stem / filename
     if subfolder_path.exists():
         return subfolder_path
-    return Path(out_dir) / filename
+    flat_path = out_dir / filename
+    if flat_path.exists():
+        return flat_path
+    if out_dir.exists():
+        matches = [p for p in out_dir.glob(f"**/{filename}") if p.is_file()]
+        if matches:
+            matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return matches[0]
+    # Nothing found — return the flat path so callers' .exists() check fails
+    # with a sensible default location in any error message.
+    return flat_path
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -83,6 +99,10 @@ def load_config():
         "remote_upload_enabled": False,
         "remote_upload_url": None,
         "remote_upload_path": "audio-inbox",
+        # Compute / GPU.  See whisper_loader.detect_devices().
+        "compute_device": "auto",       # "auto" | "cuda" | "cpu"
+        "compute_type": "auto",         # "auto" | "float16" | "int8_float16" | "int8" | "int16" | "float32" | ...
+        "cuda_device_index": None,      # which GPU when several are present (default 0)
     }
     if CONFIG_FILE.exists():
         try:
@@ -91,6 +111,7 @@ def load_config():
             defaults.update(saved)
         except Exception:
             pass
+    defaults["hf_token"] = defaults.get("hf_token") or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
     return defaults
 
 
@@ -1016,7 +1037,13 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
         print(f"\r    [{bar}] {pct*100:5.1f}% loading model weights  ", end="", flush=True)
 
     t = time.time()
-    model = load_whisper_model(model_name, progress_callback=_print_load_progress)
+    model = load_whisper_model(
+        model_name,
+        progress_callback=_print_load_progress,
+        device=config.get("compute_device", "auto"),
+        compute_type=config.get("compute_type", "auto"),
+        cuda_device_index=config.get("cuda_device_index"),
+    )
     steps.append({"name": "Load Whisper model", "seconds": round(time.time() - t, 1)})
     print(f"\r  ✓ Whisper model '{model_name}' ready.{' ' * 40}")
 
@@ -1577,6 +1604,19 @@ def interactive_mode():
 
             elif choice == "c":
                 mic_status = "on" if config.get("mic_enabled") else "off"
+                # Probe hardware so the user can see what's actually available.
+                try:
+                    from whisper_loader import detect_devices
+                    detected = detect_devices()
+                except Exception:
+                    detected = {"cuda_available": False, "cuda_device_count": 0,
+                                "cuda_devices": [], "cpu_compute_types": [],
+                                "cuda_compute_types": []}
+                if detected["cuda_available"]:
+                    gpu_summary = ", ".join(f"[{d['index']}] {d['name']}" for d in detected["cuda_devices"])
+                    gpu_status = f"available — {gpu_summary}"
+                else:
+                    gpu_status = "no CUDA device detected (faster-whisper requires NVIDIA)"
                 print(f"\n  Current config:")
                 print(f"    Output dir:      {config['output_dir']}")
                 print(f"    Auto-transcribe: {config['auto_transcribe']}")
@@ -1585,6 +1625,10 @@ def interactive_mode():
                 print(f"    Mic capture:     {mic_status}")
                 print(f"    Mic device:      {config.get('mic_device_index', 'auto')}")
                 print(f"    Mic volume:      {config.get('mic_volume', 1.0):.0%}")
+                print(f"    Compute device:  {config.get('compute_device', 'auto')}  (GPU: {gpu_status})")
+                print(f"    Compute type:    {config.get('compute_type', 'auto')}")
+                if detected["cuda_device_count"] > 1:
+                    print(f"    CUDA index:      {config.get('cuda_device_index') if config.get('cuda_device_index') is not None else 0}")
                 print()
                 new_dir = input(f"  Output directory [{config['output_dir']}]: ").strip()
                 if new_dir:
@@ -1619,6 +1663,16 @@ def interactive_mode():
                         config["mic_volume"] = max(0.0, min(2.0, vol))
                     except ValueError:
                         pass
+                cdev = input(f"  Compute device (auto/cuda/cpu) [{config.get('compute_device', 'auto')}]: ").strip().lower()
+                if cdev in ("auto", "cuda", "cpu"):
+                    config["compute_device"] = cdev
+                ctype = input(f"  Compute type (auto/float16/int8_float16/int8/int16/float32) [{config.get('compute_type', 'auto')}]: ").strip().lower()
+                if ctype:
+                    config["compute_type"] = ctype
+                if detected["cuda_device_count"] > 1:
+                    cidx = input(f"  CUDA device index (0-{detected['cuda_device_count']-1}) [{config.get('cuda_device_index') if config.get('cuda_device_index') is not None else 0}]: ").strip()
+                    if cidx.isdigit():
+                        config["cuda_device_index"] = int(cidx)
                 save_config(config)
                 recorder = SystemAudioRecorder(config)
                 print("  ✓ Config saved.\n")
@@ -1761,11 +1815,45 @@ def main():
         default=None,
         help="Remote folder under exposer's SHARE_ROOT (default: audio-inbox)",
     )
+    parser.add_argument(
+        "--gpu-info",
+        action="store_true",
+        help="Print detected compute hardware (CUDA devices, supported compute types) and exit.",
+    )
 
     args = parser.parse_args()
 
     if args.list_devices:
         list_devices()
+        return
+
+    if args.gpu_info:
+        from whisper_loader import detect_devices
+        # Make sure box-drawing chars survive cp1252-default Windows shells.
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        d = detect_devices()
+        print("\n  -- Compute hardware --")
+        print(f"  CTranslate2 version:    {d['ctranslate2_version']}")
+        print(f"  CUDA available:         {'yes' if d['cuda_available'] else 'no'}")
+        print(f"  CUDA device count:      {d['cuda_device_count']}")
+        for dev in d["cuda_devices"]:
+            print(f"    [{dev['index']}] {dev['name']}")
+        print(f"  CPU compute types:      {', '.join(d['cpu_compute_types']) or '(unknown)'}")
+        if d["cuda_compute_types"]:
+            print(f"  CUDA compute types:     {', '.join(d['cuda_compute_types'])}")
+        config = load_config()
+        print(f"\n  Current settings:")
+        print(f"    compute_device:    {config.get('compute_device', 'auto')}")
+        print(f"    compute_type:      {config.get('compute_type', 'auto')}")
+        print(f"    cuda_device_index: {config.get('cuda_device_index')}")
+        if not d["cuda_available"]:
+            print("\n  Note: faster-whisper / CTranslate2 only supports NVIDIA CUDA "
+                  "for GPU inference.\n        AMD GPUs (ROCm) and integrated "
+                  "graphics cannot be used — the tool will run on CPU.")
+        print()
         return
 
     if args.transcribe:

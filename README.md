@@ -99,6 +99,9 @@ python capture.py --transcribe recording.wav --start-time 60 --end-time 300
 # List available audio devices (loopback + input)
 python capture.py --list-devices
 
+# Show detected compute hardware (CUDA / CPU compute types)
+python capture.py --gpu-info
+
 # Custom name / output directory
 python capture.py --record 30 --name "Sprint planning" --output-dir D:\Meetings
 ```
@@ -119,6 +122,7 @@ Useful flags:
 | `--output-dir DIR` | Override output directory |
 | `--start-time / --end-time` | Trim a segment for partial transcription (seconds) |
 | `--list-devices` | Print loopback + input devices |
+| `--gpu-info` | Print detected compute hardware and current device/compute-type settings |
 
 ---
 

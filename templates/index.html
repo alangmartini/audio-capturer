@@ -1017,6 +1017,42 @@
   </div>
 
   <div class="card">
+    <h3>Compute / GPU</h3>
+    <div id="compute-status" class="diarization-status" style="margin-bottom:12px;"></div>
+    <div class="setting-group">
+      <label for="set-compute-device">Compute Device</label>
+      <select id="set-compute-device">
+        <option value="auto">Auto (use GPU if available)</option>
+        <option value="cuda">CUDA (force GPU)</option>
+        <option value="cpu">CPU (force CPU)</option>
+      </select>
+      <div class="help-text">
+        <strong>Auto</strong> picks the GPU when CUDA is detected, falls back to CPU otherwise — safe to leave on this when moving between machines.
+        <strong>faster-whisper only supports NVIDIA CUDA</strong>; AMD/Intel/integrated GPUs cannot be used and the tool will run on CPU regardless.
+      </div>
+    </div>
+    <div class="setting-group">
+      <label for="set-compute-type">Compute Type</label>
+      <select id="set-compute-type">
+        <option value="auto">Auto (float16 on GPU, int8 on CPU)</option>
+        <option value="float16">float16 — fastest on GPU</option>
+        <option value="int8_float16">int8_float16 — quantized on GPU, less VRAM</option>
+        <option value="bfloat16">bfloat16 — GPU only (newer cards)</option>
+        <option value="int8">int8 — fastest on CPU, slight accuracy loss</option>
+        <option value="int8_float32">int8_float32 — CPU, mixed precision</option>
+        <option value="int16">int16 — CPU (often unsupported, falls back)</option>
+        <option value="float32">float32 — full precision, slowest</option>
+      </select>
+      <div class="help-text">If the chosen type isn't supported on this machine, the loader walks a fallback list and prints which one it actually used.</div>
+    </div>
+    <div class="setting-group" id="cuda-index-group" style="display:none;">
+      <label for="set-cuda-index">CUDA Device Index</label>
+      <input type="number" id="set-cuda-index" min="0" placeholder="0">
+      <div class="help-text">Which GPU to use when several are present. Leave empty for the first one.</div>
+    </div>
+  </div>
+
+  <div class="card">
     <h3>Microphone Capture</h3>
     <div class="setting-group">
       <div class="toggle-row">
@@ -1912,6 +1948,12 @@ async function loadSettings() {
   hotwordsEl.value = s.hotwords || '';
   updateHotwordCount();
 
+  // Compute / GPU settings
+  document.getElementById('set-compute-device').value = s.compute_device || 'auto';
+  document.getElementById('set-compute-type').value = s.compute_type || 'auto';
+  document.getElementById('set-cuda-index').value = (s.cuda_device_index !== null && s.cuda_device_index !== undefined) ? s.cuda_device_index : '';
+  await refreshComputeStatus();
+
   // Diarization settings
   document.getElementById('set-diarization').checked = !!s.diarization_enabled;
   document.getElementById('set-hf-token').value = s.hf_token || '';
@@ -1969,6 +2011,38 @@ async function loadSettings() {
   }
 }
 
+async function refreshComputeStatus() {
+  const el = document.getElementById('compute-status');
+  const idxGroup = document.getElementById('cuda-index-group');
+  if (!el) return;
+  const data = await apiCall('/api/compute/status');
+  if (!data || !data.ok) {
+    el.className = 'diarization-status warn';
+    el.textContent = 'Could not detect compute hardware.';
+    return;
+  }
+  const d = data.detected;
+  // Show the multi-GPU index field only when it's actually useful.
+  if (idxGroup) idxGroup.style.display = (d.cuda_device_count > 1) ? '' : 'none';
+
+  if (data.warning) {
+    el.className = 'diarization-status warn';
+    el.innerHTML = `⚠ ${escapeHtml(data.warning)}`;
+    return;
+  }
+
+  let summary;
+  if (d.cuda_available) {
+    const names = d.cuda_devices.map(x => `[${x.index}] ${escapeHtml(x.name)}`).join(', ');
+    summary = `<strong>GPU available</strong> — ${names}. Effective device: <strong>${data.effective_device}</strong>.`;
+    el.className = 'diarization-status ok';
+  } else {
+    summary = `No CUDA device detected. Running on <strong>CPU</strong>. <span style="opacity:.8">faster-whisper requires NVIDIA + CUDA libraries; AMD/Intel/integrated GPUs cannot be used.</span>`;
+    el.className = 'diarization-status';
+  }
+  el.innerHTML = summary;
+}
+
 async function loadRecordUploadSettings() {
   const data = await apiCall('/api/settings');
   if (!data) return;
@@ -1999,6 +2073,12 @@ async function saveSettings() {
     mic_enabled: document.getElementById('set-mic-enabled').checked,
     mic_device_index: micDevVal ? parseInt(micDevVal) : null,
     mic_volume: parseInt(document.getElementById('set-mic-volume').value) / 100,
+    compute_device: document.getElementById('set-compute-device').value,
+    compute_type: document.getElementById('set-compute-type').value,
+    cuda_device_index: (function () {
+      const v = document.getElementById('set-cuda-index').value;
+      return v === '' ? null : parseInt(v);
+    })(),
   };
   const data = await apiCall('/api/settings', {
     method: 'PUT',

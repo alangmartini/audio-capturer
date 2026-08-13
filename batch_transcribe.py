@@ -20,6 +20,17 @@ import threading
 import time
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 try:
     from faster_whisper import WhisperModel  # noqa: F401
 except ImportError:
@@ -51,6 +62,10 @@ def load_config():
         "hf_token": None,
         "diarization_max_speakers": None,
         "language": None,
+        # Compute / GPU.  See whisper_loader.detect_devices().
+        "compute_device": "auto",
+        "compute_type": "auto",
+        "cuda_device_index": None,
     }
     if CONFIG_FILE.exists():
         try:
@@ -59,6 +74,7 @@ def load_config():
             defaults.update(saved)
         except Exception:
             pass
+    defaults["hf_token"] = defaults.get("hf_token") or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
     return defaults
 
 
@@ -175,6 +191,7 @@ def transcribe_one(filepath: Path, model, output_formats=("txt", "srt", "json"),
                 progress_callback=_diarize_progress,
             )
 
+        _parallel_start = time.time()
         _whisper_start = time.time()
         _diarize_start = time.time()
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -341,7 +358,13 @@ def batch_process(directory: Path, model_name="base", diarize=None):
         bar = '█' * filled + '░' * (bar_len - filled)
         print(f"\r    [{bar}] {pct*100:5.1f}% loading model weights  ", end="", flush=True)
 
-    model = load_whisper_model(model_name, progress_callback=_print_load_progress)
+    model = load_whisper_model(
+        model_name,
+        progress_callback=_print_load_progress,
+        device=config.get("compute_device", "auto"),
+        compute_type=config.get("compute_type", "auto"),
+        cuda_device_index=config.get("cuda_device_index"),
+    )
     print(f"\r  ✓ Whisper model '{model_name}' ready.{' ' * 40}\n")
 
     for i, wav in enumerate(pending, 1):
@@ -353,6 +376,8 @@ def batch_process(directory: Path, model_name="base", diarize=None):
 
 def watch_mode(directory: Path, model_name="base", diarize=None):
     """Watch directory for new WAV files and transcribe them."""
+    config = load_config()
+
     print(f"  Watching: {directory}")
     print(f"  Model:    {model_name}")
     print(f"  Press Ctrl+C to stop.\n")
@@ -366,7 +391,13 @@ def watch_mode(directory: Path, model_name="base", diarize=None):
         bar = '█' * filled + '░' * (bar_len - filled)
         print(f"\r    [{bar}] {pct*100:5.1f}% loading model weights  ", end="", flush=True)
 
-    model = load_whisper_model(model_name, progress_callback=_print_load_progress)
+    model = load_whisper_model(
+        model_name,
+        progress_callback=_print_load_progress,
+        device=config.get("compute_device", "auto"),
+        compute_type=config.get("compute_type", "auto"),
+        cuda_device_index=config.get("cuda_device_index"),
+    )
     print(f"\r  ✓ Whisper model '{model_name}' ready. Waiting for new files...{' ' * 20}\n")
     seen = {f.name: f for f in directory.glob("**/*.wav")}
 

@@ -623,7 +623,13 @@ def _transcribe_worker(filename, model_name, start_time=None, end_time=None):
                 _transcription["model_load_progress"] = {"percent": round(pct * 100, 1)}
 
         t = time.time()
-        model = load_whisper_model(model_name, progress_callback=_model_load_progress)
+        model = load_whisper_model(
+            model_name,
+            progress_callback=_model_load_progress,
+            device=config.get("compute_device", "auto"),
+            compute_type=config.get("compute_type", "auto"),
+            cuda_device_index=config.get("cuda_device_index"),
+        )
         steps.append({"name": "Load Whisper model", "seconds": round(time.time() - t, 1)})
 
         # --- Step: Trim audio (if partial) ---
@@ -1023,6 +1029,7 @@ def update_settings():
         "vocabulary_terms", "hotwords", "language",
         "mic_enabled", "mic_device_index", "mic_volume",
         "remote_upload_enabled", "remote_upload_url", "remote_upload_path",
+        "compute_device", "compute_type", "cuda_device_index",
     }
     for key in allowed_keys:
         if key in data:
@@ -1064,6 +1071,41 @@ def diarization_status():
         "available": is_diarization_available(),
         "enabled": config.get("diarization_enabled", False),
         "has_token": bool(config.get("hf_token")),
+    })
+
+
+# ─── Compute / GPU status ─────────────────────────────────────────────────
+
+@app.route("/api/compute/status")
+def compute_status():
+    """Report what compute hardware CTranslate2 actually sees on this box."""
+    from whisper_loader import detect_devices
+    config = load_config()
+    detected = detect_devices()
+    # Predict the effective device given current settings, so the UI can show
+    # "running on CPU" even when 'auto' is selected.
+    requested = (config.get("compute_device") or "auto").lower()
+    if requested == "auto":
+        effective = "cuda" if detected["cuda_available"] else "cpu"
+    elif requested == "cuda" and not detected["cuda_available"]:
+        effective = "cpu"  # will actually error at load time; flag in UI
+    else:
+        effective = requested
+    return jsonify({
+        "ok": True,
+        "detected": detected,
+        "settings": {
+            "compute_device": config.get("compute_device", "auto"),
+            "compute_type": config.get("compute_type", "auto"),
+            "cuda_device_index": config.get("cuda_device_index"),
+        },
+        "effective_device": effective,
+        "warning": (
+            "compute_device is set to 'cuda' but no CUDA device is available. "
+            "faster-whisper requires NVIDIA + CUDA libraries; AMD GPUs are not "
+            "supported. Switch to 'auto' or 'cpu'."
+            if requested == "cuda" and not detected["cuda_available"] else None
+        ),
     })
 
 
