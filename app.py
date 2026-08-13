@@ -68,6 +68,13 @@ _transcription = {
     "diarize_progress": None,
     "diarization_enabled": False,
     "started_at": None,
+    # Set when the work is happening on the host rather than here; the UI shows
+    # the same banner either way, with `remote_message` carrying the host's own
+    # wording for the current stage.
+    "remote": False,
+    "remote_message": None,
+    "remote_summary": None,
+    "eta_seconds": None,
 }
 _transcription_lock = threading.Lock()
 
@@ -305,11 +312,17 @@ def recording_stop():
     if _recording_upload_override is not None:
         config.update(_recording_upload_override)
         _recording_upload_override = None
-    if filepath and config.get("auto_transcribe"):
+    # Remote transcription takes precedence over the local pipeline: both write
+    # the same output files, and the point of enabling it is that this machine
+    # should not be doing the work.
+    if filepath and config.get("remote_transcribe_enabled") and config.get("remote_upload_url"):
+        _start_remote_transcription(filepath, config)
+        result["remote_transcribe_started"] = True
+    elif filepath and config.get("auto_transcribe"):
         _start_transcription(filepath.name, config.get("whisper_model", "base"))
         result["auto_transcribe_started"] = True
 
-    if filepath and config.get("remote_upload_enabled"):
+    if filepath and config.get("remote_upload_enabled") and not config.get("remote_transcribe_enabled"):
         def _upload_worker(path, upload_config):
             maybe_upload_recording(path, upload_config)
 
@@ -435,6 +448,135 @@ def upload_recording_to_exposer(name):
         return jsonify({"ok": False, "error": "Upload failed"}), 500
 
     return jsonify({"ok": True, "remote_path": result["remote_path"]})
+
+
+# ─── Remote transcription ─────────────────────────────────────────────────
+#
+# The recording is sent to the host machine, which transcribes and diarizes it
+# and sends the transcript back.  Progress is published into the same
+# `_transcription` state the local pipeline uses, so the UI shows one banner
+# for both and nothing had to be duplicated — the stage names simply come from
+# the host instead of from this process.
+
+def _remote_transcribe_worker(wav_path, config, options):
+    from remote_client import RemoteTranscribeError, remote_transcribe
+
+    started = time.time()
+
+    def on_event(event):
+        stage = event.get("stage")
+        pct = event.get("progress")
+        with _transcription_lock:
+            if not _transcription.get("active"):
+                return  # cancelled
+            _transcription.update({
+                "stage": stage,
+                "remote_message": event.get("message"),
+                "progress": (
+                    {"percent": round(pct * 100, 1), "elapsed": event.get("elapsed_seconds", 0)}
+                    if isinstance(pct, (int, float)) else None
+                ),
+                "diarize_detail": event.get("diarize_step"),
+                "eta_seconds": event.get("eta_seconds"),
+            })
+
+    try:
+        summary = remote_transcribe(
+            wav_path,
+            options["server_url"],
+            user=options.get("user"),
+            password=options.get("password"),
+            remote_dir=options.get("remote_dir") or "audio-inbox",
+            model=options.get("model"),
+            language=config.get("language"),
+            diarize=options.get("diarize"),
+            on_event=on_event,
+            cancel_check=lambda: not _transcription.get("active"),
+        )
+        with _transcription_lock:
+            _transcription.update({
+                "active": False,
+                "stage": "done",
+                "error": None,
+                "remote_message": f"Transcript ready ({round(time.time() - started)}s round trip)",
+                "remote_summary": summary,
+            })
+    except RemoteTranscribeError as exc:
+        with _transcription_lock:
+            _transcription.update({"active": False, "stage": "error", "error": str(exc)})
+    except Exception as exc:
+        with _transcription_lock:
+            _transcription.update({
+                "active": False, "stage": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+
+
+def _start_remote_transcription(wav_path, config, data=None):
+    """
+    Claim the shared transcription slot and start the round trip in the
+    background.  Returns False if something is already transcribing.
+    """
+    data = data or {}
+    with _transcription_lock:
+        if _transcription["active"]:
+            return False
+        _transcription.update({
+            "active": True,
+            "remote": True,
+            "stage": "preparing",
+            "filename": wav_path.name,
+            "model": data.get("model") or config.get("remote_model"),
+            "error": None,
+            "progress": None,
+            "diarize_detail": None,
+            "remote_message": "Preparing to send to the host",
+            "remote_summary": None,
+            "started_at": time.time(),
+            "diarization_enabled": bool(
+                data.get("diarize") if data.get("diarize") is not None
+                else config.get("remote_diarize") or config.get("diarization_enabled")
+            ),
+        })
+
+    options = {
+        "server_url": data.get("remote_upload_url") or config.get("remote_upload_url"),
+        "user": data.get("remote_upload_user") or config.get("remote_upload_user"),
+        "password": data.get("remote_upload_password") or config.get("remote_upload_password"),
+        "remote_dir": data.get("remote_upload_path") or config.get("remote_upload_path"),
+        "model": data.get("model") or config.get("remote_model"),
+        "diarize": data.get("diarize") if data.get("diarize") is not None else config.get("remote_diarize"),
+    }
+    threading.Thread(
+        target=_remote_transcribe_worker,
+        args=(wav_path, config, options),
+        daemon=True,
+    ).start()
+    return True
+
+
+@app.route("/api/recordings/<name>/remote-transcribe", methods=["POST"])
+def remote_transcribe_recording(name):
+    """Send a recording to the host for transcription and track it here."""
+    data = request.get_json(silent=True) or {}
+    config = load_config()
+
+    server_url = data.get("remote_upload_url") or config.get("remote_upload_url")
+    if not server_url:
+        return jsonify({
+            "ok": False,
+            "error": "No host URL configured. Set it in Settings -> Remote Processing.",
+        }), 400
+
+    out_dir = _get_output_dir()
+    wav_path = resolve_wav(out_dir, name)
+    if not wav_path.exists():
+        return jsonify({"ok": False, "error": f"File not found: {name}"}), 404
+
+    if not _start_remote_transcription(wav_path, config, data):
+        return jsonify({"ok": False, "error": "A transcription is already running"}), 409
+
+    return jsonify({"ok": True, "filename": wav_path.name, "host": server_url})
 
 
 @app.route("/api/recordings/<name>/duration")
@@ -942,6 +1084,10 @@ def transcribe_status():
                 "diarize_progress": None,
                 "diarization_enabled": False,
                 "started_at": None,
+                "remote": False,
+                "remote_message": None,
+                "remote_summary": None,
+                "eta_seconds": None,
             })
     return jsonify(snapshot)
 
@@ -1029,6 +1175,8 @@ def update_settings():
         "vocabulary_terms", "hotwords", "language",
         "mic_enabled", "mic_device_index", "mic_volume",
         "remote_upload_enabled", "remote_upload_url", "remote_upload_path",
+        "remote_transcribe_enabled", "remote_upload_user", "remote_upload_password",
+        "remote_model", "remote_diarize",
         "compute_device", "compute_type", "cuda_device_index",
     }
     for key in allowed_keys:
@@ -1050,10 +1198,15 @@ def remote_upload_test():
     if not server_url:
         return jsonify({"ok": False, "error": "Upload URL is required"}), 400
 
+    config = load_config()
     try:
         from remote_upload import test_connection
 
-        result = test_connection(server_url)
+        result = test_connection(
+            server_url,
+            user=data.get("remote_upload_user") or config.get("remote_upload_user"),
+            password=data.get("remote_upload_password") or config.get("remote_upload_password"),
+        )
         return jsonify({"ok": True, **result})
     except Exception as exc:
         return jsonify({

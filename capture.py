@@ -99,6 +99,13 @@ def load_config():
         "remote_upload_enabled": False,
         "remote_upload_url": None,
         "remote_upload_path": "audio-inbox",
+        # Remote transcription: send the recording to the host, let it
+        # transcribe + diarize, pull the transcript back.  See remote_client.py.
+        "remote_transcribe_enabled": False,   # do it automatically after each recording
+        "remote_upload_user": "exposer",      # Basic-auth user of the exposer proxy
+        "remote_upload_password": None,       # falls back to $REMOTE_UPLOAD_PASSWORD
+        "remote_model": None,                 # None = let the host choose
+        "remote_diarize": None,               # None = use the host's setting
         # Compute / GPU.  See whisper_loader.detect_devices().
         "compute_device": "auto",       # "auto" | "cuda" | "cpu"
         "compute_type": "auto",         # "auto" | "float16" | "int8_float16" | "int8" | "int16" | "float32" | ...
@@ -144,6 +151,107 @@ def maybe_upload_recording(filepath, config):
     except Exception as exc:
         print(f"\n  [WARN] Remote upload failed: {type(exc).__name__}: {exc}")
         return None
+
+
+def _apply_remote_args(config, args):
+    """Fold the remote-related CLI flags into a config dict."""
+    if getattr(args, "upload_url", None):
+        config["remote_upload_url"] = args.upload_url
+    if getattr(args, "upload_path", None):
+        config["remote_upload_path"] = args.upload_path
+    if getattr(args, "upload_user", None):
+        config["remote_upload_user"] = args.upload_user
+    if getattr(args, "upload_password", None):
+        config["remote_upload_password"] = args.upload_password
+    if getattr(args, "remote", False):
+        config["remote_transcribe_enabled"] = True
+    return config
+
+
+def remote_transcribe_recording(filepath, config, model=None):
+    """
+    Send a recording to the host for transcription and wait for it here.
+
+    The host does the work; this prints its progress as it arrives so the
+    experience matches a local transcription, and the transcript lands in the
+    recording's own folder.  Returns the summary dict, or None on failure —
+    failures are reported, never raised, because this is usually the last step
+    after a recording the user does not want to lose.
+    """
+    if not filepath:
+        return None
+    server_url = config.get("remote_upload_url")
+    if not server_url:
+        print("\n  [ERROR] No remote host URL configured.")
+        print("          Set it with --upload-url, or in Settings -> Remote Processing.")
+        return None
+
+    from remote_client import RemoteTranscribeError, remote_transcribe
+
+    print(f"\n  ── Remote transcription ──")
+    print(f"  File: {Path(filepath).name}")
+    print(f"  Host: {server_url}")
+    print()
+
+    state = {"stage": None, "line": False}
+
+    def render(event):
+        stage = event.get("stage")
+        pct = event.get("progress")
+        message = event.get("message") or event.get("label") or stage
+
+        # One line per stage, rewritten in place while that stage runs.
+        if stage != state["stage"]:
+            if state["line"]:
+                print()
+            state["stage"] = stage
+            state["line"] = False
+
+        if stage == "done":
+            print(f"  ✓ {message}")
+            state["line"] = False
+            return
+        if stage == "error":
+            print(f"  ✗ {message}")
+            state["line"] = False
+            return
+
+        if pct is None:
+            print(f"\r  ⟳ {message}{' ' * 20}", end="", flush=True)
+        else:
+            filled = int(30 * max(0.0, min(1.0, pct)))
+            bar = "█" * filled + "░" * (30 - filled)
+            eta = event.get("eta_seconds")
+            suffix = f" | ETA: {int(eta // 60)}:{int(eta % 60):02d}" if eta else ""
+            print(f"\r  [{bar}] {pct * 100:5.1f}% {message}{suffix}   ", end="", flush=True)
+        state["line"] = True
+
+    try:
+        summary = remote_transcribe(
+            filepath,
+            server_url,
+            user=config.get("remote_upload_user"),
+            password=config.get("remote_upload_password"),
+            remote_dir=config.get("remote_upload_path") or "audio-inbox",
+            model=model or config.get("remote_model"),
+            language=config.get("language"),
+            diarize=config.get("remote_diarize"),
+            on_event=render,
+        )
+    except RemoteTranscribeError as exc:
+        print(f"\n  [ERROR] Remote transcription failed: {exc}")
+        return None
+    except Exception as exc:
+        print(f"\n  [ERROR] Remote transcription failed: {type(exc).__name__}: {exc}")
+        return None
+
+    print(f"  ✓ Text saved: {summary['txt_path']}")
+    for extra in summary["outputs"]:
+        if not extra.endswith(".txt"):
+            print(f"  ✓ Also saved: {extra}")
+    if summary.get("language"):
+        print(f"  ✓ Language detected: {summary['language']}")
+    return summary
 
 
 def get_loopback_device(p: pyaudio.PyAudio, device_index=None):
@@ -995,8 +1103,25 @@ def recording_setup(config, recorder):
 
 # ─── Transcription ────────────────────────────────────────────────────────────
 
-def transcribe_file(filepath, model_name="base", start_time=None, end_time=None):
-    """Transcribe a WAV file using faster-whisper (CTranslate2)."""
+def transcribe_file(filepath, model_name="base", start_time=None, end_time=None,
+                    status_callback=None):
+    """
+    Transcribe a WAV file using faster-whisper (CTranslate2).
+
+    `status_callback(stage, message=None, progress=None, **extra)` receives the
+    same pipeline milestones that are printed to the terminal, as structured
+    events.  It exists so a caller that is not a terminal — the remote job
+    runner, which relays progress to another machine — can show the user
+    exactly what is happening without scraping stdout.  Stage names come from
+    remote_common.STAGES.
+    """
+    def _emit(stage, message=None, progress=None, **extra):
+        if status_callback:
+            try:
+                status_callback(stage, message=message, progress=progress, **extra)
+            except Exception:
+                pass  # never let a reporting failure kill a transcription
+
     try:
         from faster_whisper import WhisperModel  # noqa: F401
     except ImportError:
@@ -1013,6 +1138,8 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
     total_start = time.time()
     steps = []
     diarization_on = config.get("diarization_enabled", False)
+    _emit("preparing", f"Preparing {filepath.name}", 0.0,
+          diarization=bool(diarization_on), model=model_name)
     print(f"\n  ── Transcription starting ──")
     print(f"  File:         {filepath.name}")
     print(f"  Whisper model: {model_name}")
@@ -1028,6 +1155,7 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
 
     # --- Step: Load Whisper model ---
     print(f"  ⟳ Loading Whisper model '{model_name}' (downloading on first use, may take a few minutes)...")
+    _emit("loading_model", f"Loading Whisper model '{model_name}'", 0.0)
     from whisper_loader import load_whisper_model, transcribe_audio
 
     def _print_load_progress(pct):
@@ -1035,6 +1163,7 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
         filled = int(bar_len * pct)
         bar = '█' * filled + '░' * (bar_len - filled)
         print(f"\r    [{bar}] {pct*100:5.1f}% loading model weights  ", end="", flush=True)
+        _emit("loading_model", f"Loading Whisper model '{model_name}'", pct)
 
     t = time.time()
     model = load_whisper_model(
@@ -1099,10 +1228,16 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
         else:
             from diarize import preload_pipeline
             print(f"  ⟳ Preloading diarization model...")
+            _emit("loading_model", "Loading speaker diarization model")
             t = time.time()
+
+            def _preload_status(msg):
+                print(f"    ⟳ {msg}")
+                _emit("loading_model", f"Diarization: {msg}")
+
             preload_pipeline(
                 hf_token=config.get("hf_token"),
-                status_callback=lambda msg: print(f"    ⟳ {msg}"),
+                status_callback=_preload_status,
             )
             steps.append({"name": "Load diarization model", "seconds": round(time.time() - t, 1)})
             diarize_available = True
@@ -1122,7 +1257,15 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
         )
 
         print(f"  ⟳ Running transcription + diarization in parallel...")
+        _emit("transcribing", "Transcribing and identifying speakers in parallel", 0.0)
         _print_lock = threading.Lock()
+
+        # Whisper and diarization run at the same time, so a single "stage"
+        # would flip between the two several times a second and read as noise
+        # on a client polling every couple of seconds.  Transcription is the
+        # reported stage while both are live; diarization rides along in the
+        # extra fields and only becomes the stage once Whisper has finished.
+        _diarize_side = {"progress": None, "step": None}
 
         def _whisper_progress(pct):
             elapsed = time.time() - _parallel_start
@@ -1134,6 +1277,9 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
             eta_m, eta_s = int(eta // 60), int(eta % 60)
             with _print_lock:
                 print(f"\r  [Whisper ] [{bar}] {pct*100:5.1f}% | {el_m}:{el_s:02d} elapsed | ETA: {eta_m}:{eta_s:02d}  ", end="", flush=True)
+            _emit("transcribing", "Transcribing", pct, eta_seconds=round(eta),
+                  diarize_progress=_diarize_side["progress"],
+                  diarize_step=_diarize_side["step"])
 
         _diarize_has_bar = [False]
 
@@ -1143,6 +1289,7 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
                     print()
                     _diarize_has_bar[0] = False
                 print(f"  [Diarize ] {msg}")
+            _diarize_side["step"] = msg
 
         def _diarize_progress(pct, step):
             with _print_lock:
@@ -1150,6 +1297,8 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
                 bar = '█' * filled + '░' * (20 - filled)
                 print(f"\r  [Diarize ] [{bar}] {pct:5.1f}% — {step}  ", end="", flush=True)
                 _diarize_has_bar[0] = True
+            _diarize_side["progress"] = round(pct / 100, 4)
+            _diarize_side["step"] = step
 
         def _run_whisper():
             return transcribe_audio(model, audio_path, progress_callback=_whisper_progress, **transcribe_kwargs)
@@ -1176,6 +1325,10 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
             steps.append({"name": "Transcription", "seconds": _whisper_elapsed})
             with _print_lock:
                 print(f"\n  ✓ Transcription finished in {_whisper_elapsed}s")
+            # Whisper is done; diarization is now the only thing left running,
+            # so it becomes the reported stage.
+            _emit("diarizing", _diarize_side["step"] or "Identifying speakers",
+                  _diarize_side["progress"])
 
             try:
                 turns = diarize_future.result()
@@ -1199,6 +1352,7 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
         if turns is not None:
             # --- Step: Merge speaker labels ---
             print(f"  ⟳ Merging speaker labels with transcription...")
+            _emit("merging", "Merging speaker labels with the transcript")
             t = time.time()
             segments = merge_transcription_with_diarization(segments, turns)
 
@@ -1216,9 +1370,11 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
             steps.append({"name": "Merge speaker labels", "seconds": round(time.time() - t, 1)})
             diarized = True
             print(f"  ✓ Diarization complete — identified {len(speakers)} speaker(s): {', '.join(speakers)}")
+            _emit("merging", f"Identified {len(speakers)} speaker(s)", 1.0, speakers=list(speakers))
     else:
         # --- Sequential: transcription only ---
         print(f"  ⟳ Transcribing {filepath.name}...")
+        _emit("transcribing", "Transcribing", 0.0)
 
         def _whisper_progress_seq(pct):
             elapsed = time.time() - _seq_start
@@ -1229,6 +1385,7 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
             el_m, el_s = int(elapsed // 60), int(elapsed % 60)
             eta_m, eta_s = int(eta // 60), int(eta % 60)
             print(f"\r  [{bar}] {pct*100:5.1f}% | {el_m}:{el_s:02d} elapsed | ETA: {eta_m}:{eta_s:02d}  ", end="", flush=True)
+            _emit("transcribing", "Transcribing", pct, eta_seconds=round(eta))
 
         _seq_start = time.time()
         result = transcribe_audio(model, audio_path, progress_callback=_whisper_progress_seq, **transcribe_kwargs)
@@ -1249,6 +1406,7 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None)
         temp_path.unlink()
 
     # --- Step: Save outputs ---
+    _emit("saving", "Saving transcript files")
     t = time.time()
     txt_path = filepath.with_suffix(".txt")
     srt_path = filepath.with_suffix(".srt")
@@ -1483,6 +1641,7 @@ def interactive_mode():
             print("\n  Commands:")
             print("    [r] Start recording")
             print("    [t] Transcribe a recording")
+            print("    [h] Transcribe a recording on the host (send + get transcript back)")
             print("    [n] Rename a recording")
             print("    [l] Listen to a transcription")
             print("    [d] List audio devices")
@@ -1541,6 +1700,38 @@ def interactive_mode():
                 except Exception:
                     pass
                 transcribe_file(target, model, start_time=st, end_time=et)
+
+            elif choice == "h":
+                # Hand a recording to the host and watch it work there.
+                recordings = sorted(Path(config["output_dir"]).glob("**/*.wav"))
+                if not recordings:
+                    print("  No recordings found.\n")
+                    continue
+                print("\n  Available recordings:")
+                for i, r in enumerate(recordings[-10:], 1):
+                    size = r.stat().st_size / (1024 * 1024)
+                    print(f"    [{i}] {r.name}  ({size:.1f} MB)")
+                idx = input("\n  Select number (or path): ").strip()
+                if idx.isdigit() and 1 <= int(idx) <= len(recordings[-10:]):
+                    target = recordings[-10:][int(idx) - 1]
+                else:
+                    target = Path(idx)
+
+                if not config.get("remote_upload_url"):
+                    url = input("\n  Host URL (e.g. https://exposer.<account>.workers.dev): ").strip()
+                    if not url:
+                        print("  Cancelled.\n")
+                        continue
+                    config["remote_upload_url"] = url
+                    save_config(config)
+                if not config.get("remote_upload_password") and not os.environ.get("REMOTE_UPLOAD_PASSWORD"):
+                    pw = input("  Host password (blank if the host needs none): ").strip()
+                    if pw:
+                        config["remote_upload_password"] = pw
+                        save_config(config)
+
+                remote_transcribe_recording(target, config)
+                print()
 
             elif choice == "n":
                 # Rename a recording
@@ -1804,6 +1995,32 @@ def main():
              "Warning: this typically kills playback by forcing the headset into call mode.",
     )
     parser.add_argument(
+        "--remote-transcribe",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Send an existing recording to the host to be transcribed there, "
+             "then download the transcript (shows the host's progress live)",
+    )
+    parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="With --record: transcribe on the host instead of locally",
+    )
+    parser.add_argument(
+        "--upload-user",
+        type=str,
+        default=None,
+        help="Basic-auth user for the exposer proxy (default: exposer)",
+    )
+    parser.add_argument(
+        "--upload-password",
+        type=str,
+        default=None,
+        help="Basic-auth password for the exposer proxy "
+             "(default: $REMOTE_UPLOAD_PASSWORD)",
+    )
+    parser.add_argument(
         "--upload-url",
         type=str,
         default=None,
@@ -1862,6 +2079,11 @@ def main():
         transcribe_file(args.transcribe, model, start_time=args.start_time, end_time=args.end_time)
         return
 
+    if args.remote_transcribe:
+        config = _apply_remote_args(load_config(), args)
+        summary = remote_transcribe_recording(args.remote_transcribe, config, model=args.model)
+        return 0 if summary else 1
+
     if args.record is not None:
         config = load_config()
         if args.output_dir:
@@ -1874,11 +2096,11 @@ def main():
             config["mic_device_index"] = args.mic_device
         if args.mic_volume is not None:
             config["mic_volume"] = max(0.0, min(2.0, args.mic_volume))
-        if args.upload_url:
+        config = _apply_remote_args(config, args)
+        if args.upload_url and not args.remote:
+            # --remote handles the transfer itself; plain --upload-url keeps the
+            # older fire-and-forget upload behaviour.
             config["remote_upload_enabled"] = True
-            config["remote_upload_url"] = args.upload_url
-        if args.upload_path:
-            config["remote_upload_path"] = args.upload_path
         recorder = SystemAudioRecorder(config)
 
         def on_sigint(sig, frame):
@@ -1915,10 +2137,13 @@ def main():
                     )
                 time.sleep(0.3)
             filepath = recorder.stop()
-            maybe_upload_recording(filepath, config)
-            if filepath and config.get("auto_transcribe"):
-                model = args.model or config.get("whisper_model", "base")
-                transcribe_file(filepath, model)
+            if filepath and config.get("remote_transcribe_enabled"):
+                remote_transcribe_recording(filepath, config, model=args.model)
+            else:
+                maybe_upload_recording(filepath, config)
+                if filepath and config.get("auto_transcribe"):
+                    model = args.model or config.get("whisper_model", "base")
+                    transcribe_file(filepath, model)
         else:
             err = recorder.last_error or {}
             msg = err.get("message", "Could not start recording. Check audio device.")

@@ -112,6 +112,10 @@ Useful flags:
 |------|-------------|
 | `--record MIN` | Record for N minutes then auto-stop (omit for indefinite) |
 | `--transcribe PATH` | Transcribe an existing `.wav` and exit |
+| `--remote-transcribe PATH` | Send a recording to the host, watch its progress, download the transcript |
+| `--remote` | With `--record`: transcribe on the host instead of locally |
+| `--upload-url URL` | Host endpoint, e.g. `https://exposer.<account>.workers.dev` |
+| `--upload-user / --upload-password` | Credentials for the host's proxy (default user `exposer`) |
 | `--model NAME` | Whisper model (`tiny` / `base` / `small` / `medium` / `large-v3`) |
 | `--mic` | Mix the microphone into the recording |
 | `--mic-device N` | Specific mic device index |
@@ -143,30 +147,92 @@ python batch_transcribe.py --model medium
 
 ---
 
-## Remote capture, beelink processing
+## Remote transcription (record here, transcribe on the host)
 
-Use this when audio must be captured on another Windows machine, but
-transcription/diarization should run on beelink.
+Record on a machine that has no models — a work laptop, say — and let the
+beelink do the transcription and diarization. One action sends the recording,
+shows the host's progress live, and drops the transcript into the recording's
+own folder. From the client's point of view it looks like a local
+transcription that happens to be fast.
 
-1. On beelink, run `exposer` with an upload hook:
+### On the host (beelink), once
 
 ```powershell
-$env:SHARE_ROOT="C:\Users\Alan Beelink\MeetingInbox"
-$env:UPLOAD_HOOK='python "C:\Users\Alan Beelink\dev\audio-capturer\capture.py" --transcribe "%UPLOADED_FILE_PATH%" --model base'
-npm start
+.\setup-remote-host.ps1              # sets SHARE_ROOT + UPLOAD_HOOK, checks the stack
+.\start-exposer.cmd                  # restart exposer so it picks them up
 ```
 
-2. On the remote machine, record and upload the finalized WAV:
+The hook is `remote_job.py`. Exposer runs it for every uploaded file; it
+transcribes, diarizes, and writes a status document the client polls.
+
+### On the client
+
+```powershell
+# Send an existing recording and wait for the transcript
+python capture.py --remote-transcribe recording.wav `
+  --upload-url https://exposer.<account>.workers.dev `
+  --upload-password <proxy password>
+
+# Record for 60 minutes, then transcribe on the host instead of locally
+python capture.py --record 60 --remote --upload-url https://exposer.<account>.workers.dev
+```
+
+Interactive mode has this as **[h]**; the web UI has a **Transcribe on Host**
+button on every recording, plus **Settings -> Remote Processing** to store the
+URL, credentials, and an optional "transcribe on the host after each
+recording" toggle. The password can also come from `$REMOTE_UPLOAD_PASSWORD`
+instead of being saved to the config file.
+
+### Why it works through a VPN
+
+The client only ever talks to `https://exposer.<account>.workers.dev`, the
+Cloudflare Worker in front of exposer's tunnel — no LAN access, no direct
+route to the beelink. Every request carries HTTP Basic auth for that Worker.
+
+Audio is re-encoded to 16 kHz mono FLAC before it is sent: Whisper and
+pyannote both resample to that internally, so nothing they use is lost, and an
+hour of 48 kHz stereo drops from roughly 660 MB to 55 MB. That keeps uploads
+tolerable on a VPN and well inside the Worker's request-body limit.
+
+### What lands where
+
+On the host, under `<SHARE_ROOT>`:
+
+```
+audio-inbox/<client-host>/<recording>/
+  <recording>.flac           # uploaded audio
+  <recording>.request.json   # what the client asked for (model, language, diarization)
+  <recording>.status.json    # live progress — this is what the client polls
+  <recording>.joblog.jsonl   # structured per-job log
+  <recording>.txt/.srt/.json # results
+```
+
+On the client, `.txt`, `.srt` and `.json` are written next to the original
+`.wav`, exactly as a local transcription would.
+
+### When something goes wrong
+
+Every stage is reported, so failures surface on the client rather than
+hanging. If a job dies, read the host's log for that recording:
+
+```powershell
+# from the client, over the same endpoint
+curl -u exposer:<password> "https://exposer.<account>.workers.dev/api/download?path=audio-inbox/<client-host>/<rec>/<rec>.joblog.jsonl"
+```
+
+Each line is a JSON event (`job_received`, `job_stage`, `job_done`,
+`job_failed`) tagged with the same `job_id`. Exposer discards the hook's
+stdout, which is why the log is written to the share instead.
+
+Jobs are serialized on the host — a second upload arriving mid-job reports
+`queued` to its client until the first finishes.
+
+### Fire-and-forget upload (no transcript returned)
+
+The older behaviour is still available when you only want the file moved:
 
 ```powershell
 python capture.py --record 60 --upload-url http://beelink:8080 --upload-path audio-inbox
-```
-
-The web UI also has this under **Settings -> Remote Processing**. Uploaded
-recordings are stored as:
-
-```
-<SHARE_ROOT>/audio-inbox/<remote-host>/<recording>/<recording>.wav
 ```
 
 ---
