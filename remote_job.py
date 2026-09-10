@@ -65,7 +65,6 @@ class JobLock:
         self.fd = None
 
     def acquire(self):
-        announced = False
         while True:
             try:
                 self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -83,9 +82,8 @@ class JobLock:
                     except OSError:
                         pass
                     continue
-                if not announced and self.on_wait:
+                if self.on_wait:
                     self.on_wait()
-                    announced = True
                 time.sleep(self.poll)
 
     def release(self):
@@ -119,9 +117,10 @@ class StatusWriter:
     changes and terminal states always flush immediately.
     """
 
-    def __init__(self, path, job_id, min_interval=1.0):
+    def __init__(self, path, job_id, min_interval=1.0, request_id=None):
         self.path = Path(path)
         self.job_id = job_id
+        self.request_id = request_id
         self.min_interval = min_interval
         self.started_at = time.time()
         self.last_write = 0.0
@@ -136,6 +135,7 @@ class StatusWriter:
                 self.job_id, stage, message=message, progress=progress,
                 started_at=self.started_at,
                 elapsed_seconds=round(now - self.started_at, 1),
+                request_id=self.request_id,
                 **extra,
             )
             if force or stage_changed or (now - self.last_write) >= self.min_interval:
@@ -189,19 +189,19 @@ def _read_manifest(audio_path):
 def run_job(audio_path, args):
     audio_path = Path(audio_path).resolve()
     job_id = f"{audio_path.parent.name}/{audio_path.stem}"
-    req_id = new_request_id()
+    manifest = _read_manifest(audio_path)
+    req_id = manifest.get("request_id") or new_request_id()
 
     set_log_sink(audio_path.with_suffix(".joblog.jsonl"), job_id=job_id, request_id=req_id)
-    status = StatusWriter(audio_path.with_suffix(".status.json"), job_id)
+    status = StatusWriter(audio_path.with_suffix(".status.json"), job_id, request_id=req_id)
 
     log_event("job_received", path=str(audio_path),
               bytes=audio_path.stat().st_size if audio_path.exists() else None)
     status.update("received", "Host received the recording", 0.0, force=True)
 
-    manifest = _read_manifest(audio_path)
     overrides = _resolve_config_overrides(args)
     for key in ("whisper_model", "diarization_enabled", "language"):
-        if key in manifest and key not in overrides:
+        if key in manifest:
             overrides[key] = manifest[key]
 
     # capture.transcribe_file reads settings from the saved config, so per-job
@@ -284,12 +284,12 @@ def main():
         description="Transcribe an uploaded recording and publish progress for the sender."
     )
     parser.add_argument("path", nargs="?", help="Audio file to process (from UPLOAD_HOOK)")
-    parser.add_argument("--model", help="Whisper model override for this job")
-    parser.add_argument("--language", help="Force a language instead of auto-detecting")
+    parser.add_argument("--model", help="Default Whisper model (client requests take precedence)")
+    parser.add_argument("--language", help="Default language (client requests take precedence)")
     parser.add_argument("--diarize", dest="diarize", action="store_true", default=None,
-                        help="Force speaker diarization on for this job")
+                        help="Enable diarization by default (client requests take precedence)")
     parser.add_argument("--no-diarize", dest="diarize", action="store_false",
-                        help="Force speaker diarization off for this job")
+                        help="Disable diarization by default (client requests take precedence)")
     args = parser.parse_args()
 
     # exposer passes the uploaded file both as an argument and in the
@@ -324,6 +324,7 @@ def main():
                     f"{audio_path.parent.name}/{audio_path.stem}", "error",
                     message=f"Transcription failed on the host: {detail}",
                     error=detail,
+                    request_id=_read_manifest(audio_path).get("request_id"),
                 ),
                 required=True,
             )

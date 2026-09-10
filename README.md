@@ -178,11 +178,30 @@ python capture.py --remote-transcribe recording.wav `
 python capture.py --record 60 --remote --upload-url https://exposer.<account>.workers.dev
 ```
 
-Interactive mode has this as **[h]**; the web UI has a **Transcribe on Host**
+Interactive mode has this as **[h]**; the web UI has a **Transcribe Remote**
 button on every recording, plus **Settings -> Remote Processing** to store the
 URL, credentials, and an optional "transcribe on the host after each
 recording" toggle. The password can also come from `$REMOTE_UPLOAD_PASSWORD`
 instead of being saved to the config file.
+
+For one-click use on each client:
+
+1. Run `python app.py` on the computer that records the meeting.
+2. In **Settings -> Remote Processing**, enter Beelink's URL and any required
+   credentials, then save. On the current LAN, Beelink is at
+   `http://192.168.1.19:8080`; through Tailscale, use `http://100.92.66.97:8080`.
+   The LAN address can change. Clients outside those networks need the Exposer
+   tunnel URL.
+3. Record and stop, then click **Transcribe Remote** beside the recording.
+   Progress appears in the client UI and the returned transcript is saved beside
+   the audio, ready to view or download.
+
+The button uses the saved credentials (or the client's environment) without
+asking again. Enable **Transcribe on the host after each recording** if you
+want stopping the recording to start this round trip automatically.
+
+Keep both host and clients updated: status messages identify the submission so
+retrying a recording cannot accidentally return its previous transcript.
 
 ### Why it works through a VPN
 

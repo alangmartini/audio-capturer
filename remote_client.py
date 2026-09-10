@@ -346,6 +346,9 @@ def _poll_until_done(endpoint, paths, emit, check_cancelled, poll_interval,
     while True:
         check_cancelled()
         doc = endpoint.download_json(paths["status"], missing_ok=True)
+        # A retry may see the previous attempt's result before the hook starts.
+        if doc is not None and doc.get("request_id") != request_id:
+            doc = None
 
         if doc is None:
             # Before the hook writes its first status the file simply isn't
@@ -359,7 +362,7 @@ def _poll_until_done(endpoint, paths, emit, check_cancelled, poll_interval,
         else:
             seen_any = True
             stage = doc.get("stage", "queued")
-            signature = (stage, doc.get("message"), doc.get("progress"))
+            signature = (stage, doc.get("message"), doc.get("progress"), doc.get("updated_at"))
             if signature != last_signature:
                 last_change = time.time()
                 last_signature = signature

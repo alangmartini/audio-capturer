@@ -950,6 +950,9 @@
 
   <div class="card">
     <h3>Remote Processing</h3>
+    <p class="hint">On each client, save Beelink's URL and credentials once. Then click
+      <strong>Transcribe Remote</strong> on a recording to send it, watch progress,
+      and receive the transcript automatically.</p>
     <div class="setting-group">
       <div class="toggle-row">
         <label style="margin:0">Send recordings to beelink</label>
@@ -1613,7 +1616,7 @@ async function loadRecordings() {
           ${hasTranscript ? `<button class="btn btn-ghost btn-sm" onclick="viewTranscript('${safeName}')">View</button>` : ''}
           ${txtPath ? `<button class="btn btn-ghost btn-sm" data-path="${txtPath.replace(/"/g, '&quot;')}" onclick="copyTranscriptPath(this.dataset.path, this)">Copy Path</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="transcribeFile('${safeName}')">Transcribe</button>
-          <button class="btn btn-ghost btn-sm" onclick="transcribeOnHost('${safeName}')" title="Send to the host, transcribe + diarize there, and bring the transcript back">Transcribe on Host</button>
+          <button class="btn btn-ghost btn-sm" onclick="transcribeOnHost('${safeName}')" title="Send to Beelink and save the returned transcript with this recording">Transcribe Remote</button>
           <button class="btn btn-ghost btn-sm" onclick="sendRecording('${safeName}')">Send</button>
           <button class="btn btn-ghost btn-sm" onclick="renameRecording('${safeName}')">Rename</button>
           <button class="btn btn-ghost btn-sm" onclick="downloadFile('${safeName}', 'wav')">Download</button>
@@ -2095,26 +2098,9 @@ async function sendRecording(name) {
 // transcript is written back into this recording's folder. Progress comes back
 // through the same banner a local transcription uses.
 async function transcribeOnHost(name) {
-  const settings = await apiCall('/api/settings');
-  const s = (settings && settings.settings) ? settings.settings : {};
-  let url = s.remote_upload_url;
-  if (!url) {
-    url = prompt('Host URL (e.g. https://exposer.<account>.workers.dev):', '');
-    if (!url || !url.trim()) return;
-    url = url.trim();
-  }
-
-  const body = { remote_upload_url: url };
-  if (!s.remote_upload_password) {
-    // No stored password and none in the host's environment means the request
-    // would come back 401 from the Worker; ask rather than fail obscurely.
-    const pw = prompt('Host password (leave blank if the host needs none):', '');
-    if (pw) body.remote_upload_password = pw;
-  }
-
   const data = await apiCall(`/api/recordings/${encodeURIComponent(name)}/remote-transcribe`, {
     method: 'POST',
-    body: JSON.stringify(body),
+    body: JSON.stringify({}),
   });
   if (data) {
     showSuccess(`Sending "${name}" to the host...`);
@@ -2131,9 +2117,14 @@ async function testRemoteUpload(scope) {
     return;
   }
 
+  const body = { remote_upload_url: uploadUrl };
+  if (scope === 'set') {
+    body.remote_upload_user = document.getElementById('set-remote-user').value.trim() || 'exposer';
+    body.remote_upload_password = document.getElementById('set-remote-password').value || null;
+  }
   const data = await apiCall('/api/remote-upload/test', {
     method: 'POST',
-    body: JSON.stringify({ remote_upload_url: uploadUrl }),
+    body: JSON.stringify(body),
   });
   if (data) {
     const addresses = data.addresses && data.addresses.length ? ` (${data.addresses.join(', ')})` : '';
