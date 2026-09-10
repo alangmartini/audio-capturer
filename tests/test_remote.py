@@ -4,11 +4,45 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from remote_client import _poll_until_done, RemoteTranscribeError
+from remote_client import _poll_until_done, RemoteTranscribeError, remote_transcribe
 from remote_job import JobLock, StatusWriter
 
 
 class RemoteTests(unittest.TestCase):
+    def test_resume_downloads_without_uploading(self):
+        with tempfile.TemporaryDirectory() as temp:
+            wav = Path(temp) / "meeting.wav"
+            wav.touch()
+            endpoint = Mock()
+            endpoint.download_json.return_value = {
+                "stage": "done", "request_id": "existing", "language": "en"
+            }
+            endpoint.download.return_value = b"transcript"
+            with patch("remote_client.RemoteEndpoint", return_value=endpoint), \
+                 patch("remote_client.prepare_audio_for_upload") as prepare:
+                result = remote_transcribe(wav, "http://host", resume=True, poll_interval=0)
+            self.assertEqual(wav.with_suffix('.txt').read_text(), "transcript")
+            self.assertEqual(len(result['outputs']), 3)
+            endpoint.upload_file.assert_not_called()
+            endpoint.upload_bytes.assert_not_called()
+            prepare.assert_not_called()
+
+    def test_heartbeat_keeps_progress_and_terminal_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'status.json'
+            status = StatusWriter(path, 'job', request_id='current')
+            status.update('diarizing', progress=0.6, force=True)
+            before = json.loads(path.read_text())
+            with patch('remote_job.time.time', return_value=before['updated_at'] + 10):
+                status.pulse()
+            after = json.loads(path.read_text())
+            self.assertGreater(after['updated_at'], before['updated_at'])
+            self.assertEqual(after['progress'], 0.6)
+            status.update('done', force=True)
+            terminal = path.read_bytes()
+            status.pulse()
+            self.assertEqual(path.read_bytes(), terminal)
+
     def poll(self, endpoint):
         return _poll_until_done(endpoint, {"status": "status", "log": "log"},
                                 Mock(), Mock(), 0, 100, "current")

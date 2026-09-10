@@ -203,6 +203,19 @@ want stopping the recording to start this round trip automatically.
 Keep both host and clients updated: status messages identify the submission so
 retrying a recording cannot accidentally return its previous transcript.
 
+If the client timed out or was closed, click **Resume Remote** on the same
+recording. This reconnects to the existing job and downloads its results without
+uploading or transcribing again. CLI equivalent:
+`python capture.py --remote-transcribe recording.wav --resume-remote`.
+After pulling an update, run `powershell -ExecutionPolicy Bypass -File .\restart_audio_ui.ps1`
+and refresh the browser. The restart script refuses to interrupt an active
+recording or transcription.
+
+The host publishes a heartbeat every ten seconds even during long model stages.
+Exposer must serve status JSON from a fully read, closed file, with caching
+disabled, and close download streams on disconnect. Otherwise Windows can keep
+the status file locked and prevent progress updates.
+
 ### Why it works through a VPN
 
 The client only ever talks to `https://exposer.<account>.workers.dev`, the

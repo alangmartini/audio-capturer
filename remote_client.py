@@ -167,6 +167,7 @@ def remote_transcribe(
     poll_interval=POLL_INTERVAL,
     keep_encoded=False,
     cancel_check=None,
+    resume=False,
 ):
     """
     Send `wav_path` to the host, wait for the transcript, save it locally.
@@ -182,6 +183,13 @@ def remote_transcribe(
     wav_path = Path(wav_path)
     if not wav_path.exists():
         raise RemoteTranscribeError(f"Recording not found: {wav_path}")
+
+    if resume:
+        return resume_remote_transcription(
+            wav_path, server_url, user=user, password=password,
+            remote_dir=remote_dir, on_event=on_event,
+            poll_interval=poll_interval, cancel_check=cancel_check,
+        )
 
     req_id = new_request_id()
     stem = wav_path.stem
@@ -392,6 +400,51 @@ def _poll_until_done(endpoint, paths, emit, check_cancelled, poll_interval,
                 f"Timed out after {int((now - start) / 60)} minutes waiting for the host."
             )
         time.sleep(poll_interval)
+
+
+def resume_remote_transcription(wav_path, server_url, *, user=None, password=None,
+                                remote_dir="audio-inbox", on_event=None,
+                                poll_interval=POLL_INTERVAL, cancel_check=None):
+    """Reconnect to an uploaded job without submitting audio or another job."""
+    wav_path = Path(wav_path)
+    endpoint = RemoteEndpoint(server_url, user=user, password=password)
+    paths = job_paths(wav_path.stem, remote_dir=remote_dir)
+    started = time.time()
+
+    def emit(stage, message=None, progress=None, **extra):
+        if on_event:
+            on_event(dict(stage=stage, message=message or STAGE_LABELS.get(stage, stage),
+                          progress=progress, elapsed_seconds=time.time() - started, **extra))
+
+    def check_cancelled():
+        if cancel_check and cancel_check():
+            raise RemoteTranscribeError("Cancelled")
+
+    try:
+        check_cancelled()
+        doc = endpoint.download_json(paths["status"], missing_ok=True)
+        if not doc or not doc.get("request_id"):
+            raise RemoteTranscribeError("No resumable remote job found for this recording.")
+        final = _poll_until_done(
+            endpoint, paths, emit, check_cancelled, poll_interval,
+            max(MIN_JOB_TIMEOUT, (_audio_duration(wav_path) or 0) * JOB_TIMEOUT_PER_AUDIO_SECOND),
+            doc["request_id"],
+        )
+        check_cancelled()
+        emit("saving", "Downloading transcript", 0.0)
+        result = fetch_existing_transcript(wav_path, server_url, user=user,
+                                          password=password, remote_dir=remote_dir)
+        if not result["outputs"]:
+            raise RemoteTranscribeError("The host has no transcript available to download.")
+        summary = dict(job_id=paths["job_id"], outputs=result["outputs"],
+                       txt_path=str(wav_path.with_suffix(".txt")),
+                       language=final.get("language"), model=final.get("model"),
+                       elapsed_seconds=round(time.time() - started, 1))
+        emit("done", "Transcript recovered", 1.0)
+        return summary
+    except Exception as exc:
+        emit("error", str(exc))
+        raise RemoteTranscribeError(str(exc)) from exc
 
 
 def fetch_existing_transcript(wav_path, server_url, *, user=None, password=None,

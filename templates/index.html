@@ -1617,6 +1617,7 @@ async function loadRecordings() {
           ${txtPath ? `<button class="btn btn-ghost btn-sm" data-path="${txtPath.replace(/"/g, '&quot;')}" onclick="copyTranscriptPath(this.dataset.path, this)">Copy Path</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="transcribeFile('${safeName}')">Transcribe</button>
           <button class="btn btn-ghost btn-sm" onclick="transcribeOnHost('${safeName}')" title="Send to Beelink and save the returned transcript with this recording">Transcribe Remote</button>
+          <button class="btn btn-ghost btn-sm" onclick="transcribeOnHost('${safeName}', true)" title="Reconnect to an existing remote job and download its transcript without uploading again">Resume Remote</button>
           <button class="btn btn-ghost btn-sm" onclick="sendRecording('${safeName}')">Send</button>
           <button class="btn btn-ghost btn-sm" onclick="renameRecording('${safeName}')">Rename</button>
           <button class="btn btn-ghost btn-sm" onclick="downloadFile('${safeName}', 'wav')">Download</button>
@@ -2097,13 +2098,13 @@ async function sendRecording(name) {
 // Hand a recording to the host: it transcribes and diarizes there, and the
 // transcript is written back into this recording's folder. Progress comes back
 // through the same banner a local transcription uses.
-async function transcribeOnHost(name) {
+async function transcribeOnHost(name, resume = false) {
   const data = await apiCall(`/api/recordings/${encodeURIComponent(name)}/remote-transcribe`, {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify({ resume }),
   });
   if (data) {
-    showSuccess(`Sending "${name}" to the host...`);
+    showSuccess(resume ? `Reconnecting to "${name}" on the host...` : `Sending "${name}" to the host...`);
     startTranscriptionPoll();
     checkTranscriptionStatus();
   }

@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -126,8 +127,35 @@ class StatusWriter:
         self.last_write = 0.0
         self.last_stage = None
         self.doc = {}
+        self.lock = threading.RLock()
+        self.stop_heartbeat = threading.Event()
+
+    def __enter__(self):
+        self.heartbeat = threading.Thread(target=self._heartbeat, daemon=True)
+        self.heartbeat.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop_heartbeat.set()
+        self.heartbeat.join()
+
+    def _heartbeat(self):
+        while not self.stop_heartbeat.wait(10):
+            self.pulse()
+
+    def pulse(self):
+        with self.lock:
+            if not self.doc or self.doc.get("stage") in TERMINAL_STAGES:
+                return
+            doc = dict(self.doc, updated_at=time.time())
+            if write_status_atomic(self.path, doc):
+                self.doc = doc
 
     def update(self, stage, message=None, progress=None, force=False, **extra):
+        with self.lock:
+            self._update(stage, message, progress, force, **extra)
+
+    def _update(self, stage, message=None, progress=None, force=False, **extra):
         try:
             stage_changed = stage != self.last_stage
             now = time.time()
@@ -141,10 +169,11 @@ class StatusWriter:
             if force or stage_changed or (now - self.last_write) >= self.min_interval:
                 # The client stops polling on a terminal stage, so that one has
                 # to land; intermediate progress can be dropped harmlessly.
-                write_status_atomic(
+                published = write_status_atomic(
                     self.path, self.doc, required=stage in TERMINAL_STAGES,
                 )
-                self.last_write = now
+                if published:
+                    self.last_write = now
             if stage_changed:
                 log_event("job_stage", stage=stage, message=message, progress=progress)
                 self.last_stage = stage
@@ -199,6 +228,11 @@ def run_job(audio_path, args):
               bytes=audio_path.stat().st_size if audio_path.exists() else None)
     status.update("received", "Host received the recording", 0.0, force=True)
 
+    with status:
+        return _process_job(audio_path, args, manifest, status)
+
+
+def _process_job(audio_path, args, manifest, status):
     overrides = _resolve_config_overrides(args)
     for key in ("whisper_model", "diarization_enabled", "language"):
         if key in manifest:

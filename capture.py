@@ -299,7 +299,7 @@ def _apply_remote_args(config, args):
     return config
 
 
-def remote_transcribe_recording(filepath, config, model=None):
+def remote_transcribe_recording(filepath, config, model=None, resume=False):
     """
     Send a recording to the host for transcription and wait for it here.
 
@@ -368,6 +368,7 @@ def remote_transcribe_recording(filepath, config, model=None):
             language=config.get("language"),
             diarize=config.get("remote_diarize"),
             on_event=render,
+            resume=resume,
         )
     except RemoteTranscribeError as exc:
         print(f"\n  [ERROR] Remote transcription failed: {exc}")
@@ -1467,6 +1468,7 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None,
         # reported stage while both are live; diarization rides along in the
         # extra fields and only becomes the stage once Whisper has finished.
         _diarize_side = {"progress": None, "step": None}
+        _whisper_finished = threading.Event()
 
         def _whisper_progress(pct):
             elapsed = time.time() - _parallel_start
@@ -1500,6 +1502,8 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None,
                 _diarize_has_bar[0] = True
             _diarize_side["progress"] = round(pct / 100, 4)
             _diarize_side["step"] = step
+            if _whisper_finished.is_set():
+                _emit("diarizing", step, _diarize_side["progress"])
 
         def _run_whisper():
             return transcribe_audio(model, audio_path, progress_callback=_whisper_progress, **transcribe_kwargs)
@@ -1522,6 +1526,7 @@ def transcribe_file(filepath, model_name="base", start_time=None, end_time=None,
             diarize_future = executor.submit(_run_diarize)
 
             result = whisper_future.result()
+            _whisper_finished.set()
             _whisper_elapsed = round(time.time() - _whisper_start, 1)
             steps.append({"name": "Transcription", "seconds": _whisper_elapsed})
             with _print_lock:
@@ -2230,6 +2235,10 @@ def main():
              "then download the transcript (shows the host's progress live)",
     )
     parser.add_argument(
+        "--resume-remote", action="store_true",
+        help="With --remote-transcribe: reconnect to the existing job without uploading again",
+    )
+    parser.add_argument(
         "--remote",
         action="store_true",
         help="With --record: transcribe on the host instead of locally",
@@ -2308,7 +2317,8 @@ def main():
 
     if args.remote_transcribe:
         config = _apply_remote_args(load_config(), args)
-        summary = remote_transcribe_recording(args.remote_transcribe, config, model=args.model)
+        summary = remote_transcribe_recording(args.remote_transcribe, config, model=args.model,
+                                             resume=args.resume_remote)
         return 0 if summary else 1
 
     if args.record is not None:

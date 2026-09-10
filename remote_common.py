@@ -135,23 +135,27 @@ def write_status_atomic(path, doc, required=False, attempts=8, retry_delay=0.05)
         attempts = max(attempts, 40)  # ~30s of retries; a reader holds it for ms
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+        tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}-{uuid.uuid4().hex}")
         payload = json.dumps(doc, ensure_ascii=False, default=str)
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(payload)
 
+        last_error = None
         for attempt in range(attempts):
             try:
                 os.replace(tmp, path)
                 return True
-            except PermissionError:
+            except PermissionError as exc:
+                last_error = exc
                 # Reader still has it open; back off a little and try again.
                 time.sleep(min(retry_delay * (attempt + 1), 1.0))
-            except OSError:
+            except OSError as exc:
+                last_error = exc
                 break
 
         log_event("status_write_contended", level="warn", path=str(path),
-                  required=required, attempts=attempts)
+                  required=required, attempts=attempts, error=str(last_error),
+                  winerror=getattr(last_error, "winerror", None))
         return False
     except Exception as exc:
         log_event("status_write_failed", level="warn", path=str(path),

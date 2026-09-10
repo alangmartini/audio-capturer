@@ -569,6 +569,7 @@ def _remote_transcribe_worker(wav_path, config, options):
             diarize=options.get("diarize"),
             on_event=on_event,
             cancel_check=lambda: not _transcription.get("active"),
+            resume=options.get("resume", False),
         )
         with _transcription_lock:
             _transcription.update({
@@ -617,6 +618,7 @@ def _start_remote_transcription(wav_path, config, data=None):
         })
 
     options = {
+        "resume": bool(data.get("resume", False)),
         "server_url": data.get("remote_upload_url") or config.get("remote_upload_url"),
         "user": data.get("remote_upload_user") or config.get("remote_upload_user"),
         "password": data.get("remote_upload_password") or config.get("remote_upload_password"),
